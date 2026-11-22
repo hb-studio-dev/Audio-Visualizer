@@ -2,15 +2,16 @@
 /**
  * GPU Particle Wave Visualizer
  *
- * WebGL2 / 最大200万パーティクル
+ * WebGL2 / 最大1000万パーティクル
  *
- * - 毎フレーム波形からパーティクルを生成
+ * - 毎フレーム波形から粒子を生成
  * - 通常粒子：赤から白へ変化
  * - アタック粒子：赤のまま
- * - アルファ値は毎フレーム一定倍率で減衰
- * - アルファ値が下限以下になったら消滅
+ * - アルファ値は毎フレーム乗算減衰
+ * - アルファ下限で消滅
  * - 移動速度は指数減衰
- * - 粒子の寿命（秒数）は設定しない
+ * - 粒子サイズは曲線的に変化
+ * - 通常・アタックでサイズを個別設定
  */
 
 export function createVisualizer(mount) {
@@ -20,7 +21,29 @@ export function createVisualizer(mount) {
   // ========================================
 
   const PARTICLE_SPACING = 1;
-  const PARTICLE_SIZE = 1.5;
+
+  // ========================================
+  // パーティクルサイズ
+  // ========================================
+
+  // 通常パーティクル
+  const NORMAL_INITIAL_SIZE = 1.5;
+  const NORMAL_FINAL_SIZE = 1.5;
+  const NORMAL_SIZE_CURVE = 3.0;
+
+  // アタックパーティクル
+  const ATTACK_INITIAL_SIZE = 3.0;
+  const ATTACK_FINAL_SIZE = 1.5;
+  const ATTACK_SIZE_CURVE = 3.0;
+
+  // SIZE_CURVE:
+  // 0 = 直線的に変化
+  // 1 = 緩やかな曲線
+  // 3 = 最初に速く、最後にゆっくり
+  // 8 = 最初に非常に速く変化
+  //
+  // INITIAL_SIZE < FINAL_SIZE なら拡大
+  // INITIAL_SIZE > FINAL_SIZE なら縮小
 
   // ========================================
   // 初期アルファ値
@@ -33,12 +56,8 @@ export function createVisualizer(mount) {
   // アルファ値の減衰
   // ========================================
 
-  // 毎フレーム掛ける倍率（60fps基準）
-  // 1.0 = 減衰しない
-  // 0.9 = 毎フレーム90%になる
-  // 0.99 = 毎フレーム99%になる
-
-  const NORMAL_ALPHA_DECAY = 0.999;
+  // 60fps基準で毎フレーム掛ける倍率
+  const NORMAL_ALPHA_DECAY = 0.997;
   const ATTACK_ALPHA_DECAY = 0.999;
 
   // この値以下になったら消滅
@@ -99,6 +118,32 @@ export function createVisualizer(mount) {
   ) {
     throw new Error(
       "PARTICLE_MIN_ALPHAは0より大きく1未満にしてください。"
+    );
+  }
+
+  if (
+    NORMAL_INITIAL_SIZE < 0 ||
+    NORMAL_FINAL_SIZE < 0 ||
+    ATTACK_INITIAL_SIZE < 0 ||
+    ATTACK_FINAL_SIZE < 0
+  ) {
+    throw new Error(
+      "パーティクルサイズは0以上にしてください。"
+    );
+  }
+
+  if (
+    NORMAL_SIZE_CURVE < 0 ||
+    ATTACK_SIZE_CURVE < 0
+  ) {
+    throw new Error(
+      "SIZE_CURVEは0以上にしてください。"
+    );
+  }
+
+  if (PARTICLE_SPACING <= 0) {
+    throw new Error(
+      "PARTICLE_SPACINGは0より大きくしてください。"
     );
   }
 
@@ -177,30 +222,81 @@ export function createVisualizer(mount) {
 
     uniform float uTime;
     uniform float uHeight;
-    uniform float uPointSize;
+    uniform float uPixelRatio;
 
-    // 初期アルファ値
+    // ========================================
+    // サイズ関連
+    // ========================================
+
+    uniform float uNormalInitialSize;
+    uniform float uNormalFinalSize;
+    uniform float uNormalSizeCurve;
+
+    uniform float uAttackInitialSize;
+    uniform float uAttackFinalSize;
+    uniform float uAttackSizeCurve;
+
+    // ========================================
+    // アルファ関連
+    // ========================================
+
     uniform float uNormalInitialAlpha;
     uniform float uAttackInitialAlpha;
 
-    // フレーム単位の減衰倍率
     uniform float uNormalAlphaDecay;
     uniform float uAttackAlphaDecay;
 
-    // アルファ下限
     uniform float uMinAlpha;
 
-    // 移動速度の半減期
+    // ========================================
+    // 移動速度関連
+    // ========================================
+
     uniform float uNormalSpeedHalfLife;
     uniform float uAttackSpeedHalfLife;
 
-    // 色変化の半減期
+    // ========================================
+    // 色変化関連
+    // ========================================
+
     uniform float uNormalColorHalfLife;
 
     out float vAlpha;
     out float vWhiteness;
+    out float vPointDiameter;
 
     const float LN2 = 0.69314718056;
+
+    // ========================================
+    // 曲線補間関数
+    // ========================================
+
+    float curvedProgress(
+      float progress,
+      float curve
+    ) {
+
+      progress = clamp(
+        progress,
+        0.0,
+        1.0
+      );
+
+      // curve = 0 の場合は線形補間
+      if (curve < 0.0001) {
+        return progress;
+      }
+
+      // 指数関数によるEase Out
+      // 0～1の範囲に正規化
+      float numerator =
+        1.0 - exp(-curve * progress);
+
+      float denominator =
+        1.0 - exp(-curve);
+
+      return numerator / denominator;
+    }
 
     void main() {
 
@@ -245,18 +341,15 @@ export function createVisualizer(mount) {
       // アルファ値の乗算減衰
       // ========================================
 
-      // alpha = initialAlpha * decay ^ frames
-
       vAlpha = initialAlpha * pow(
         alphaDecay,
         frames
       );
 
       // ========================================
-      // 消滅判定
+      // アルファ下限による消滅判定
       // ========================================
 
-      // 下限に達した場合は描画しない
       if (vAlpha <= uMinAlpha) {
 
         gl_Position = vec4(
@@ -267,8 +360,10 @@ export function createVisualizer(mount) {
         );
 
         gl_PointSize = 0.0;
+
         vAlpha = 0.0;
         vWhiteness = 0.0;
+        vPointDiameter = 0.0;
 
         return;
       }
@@ -290,7 +385,6 @@ export function createVisualizer(mount) {
       // 上下移動
       // ========================================
 
-      // 減衰する速度を積分して移動量を計算
       float yOffset =
         velocity * 60.0 *
         (1.0 - exp(-speedDecay * age)) /
@@ -312,14 +406,97 @@ export function createVisualizer(mount) {
         1.0
       );
 
-      gl_PointSize = uPointSize;
+      // ========================================
+      // パーティクルサイズ
+      // ========================================
+
+      // 初期サイズ
+      float initialSize = mix(
+        uNormalInitialSize,
+        uAttackInitialSize,
+        attackFlag
+      );
+
+      // 最終サイズ
+      float finalSize = mix(
+        uNormalFinalSize,
+        uAttackFinalSize,
+        attackFlag
+      );
+
+      // サイズ変化の曲線
+      float sizeCurve = mix(
+        uNormalSizeCurve,
+        uAttackSizeCurve,
+        attackFlag
+      );
+
+      // ========================================
+      // 消滅までの進行率
+      // ========================================
+
+      float lifeProgress = 0.0;
+
+      if (
+        alphaDecay < 1.0 &&
+        initialAlpha > uMinAlpha
+      ) {
+
+        // アルファ下限に到達するまでの
+        // 60fps換算フレーム数
+        float totalFrames =
+          log(uMinAlpha / initialAlpha) /
+          log(alphaDecay);
+
+        lifeProgress = clamp(
+          frames / max(totalFrames, 0.0001),
+          0.0,
+          1.0
+        );
+      }
+
+      // ========================================
+      // 曲線的なサイズ変化
+      // ========================================
+
+      float sizeProgress = curvedProgress(
+        lifeProgress,
+        sizeCurve
+      );
+
+      // 初期サイズから最終サイズへ補間
+      float particleSize = mix(
+        initialSize,
+        finalSize,
+        sizeProgress
+      );
+
+      // WebGLのポイントサイズは
+      // デバイスピクセル単位で指定
+      float diameter = max(
+        0.0,
+        particleSize * uPixelRatio
+      );
+
+      // WebGLの実装によっては
+      // 1px未満のgl_PointSizeは1pxに丸められる。
+      // Fragment Shader側で小さい円を再現する。
+      vPointDiameter = diameter;
+
+      gl_PointSize = max(
+        1.0,
+        diameter
+      );
 
       // ========================================
       // 通常粒子の色変化
       // ========================================
 
       float colorDecay =
-        LN2 / max(uNormalColorHalfLife, 0.0001);
+        LN2 / max(
+          uNormalColorHalfLife,
+          0.0001
+        );
 
       float whiteness =
         1.0 - exp(-colorDecay * age);
@@ -337,10 +514,11 @@ export function createVisualizer(mount) {
 
   const fragmentShaderSource = `#version 300 es
 
-    precision mediump float;
+    precision highp float;
 
     in float vAlpha;
     in float vWhiteness;
+    in float vPointDiameter;
 
     out vec4 fragColor;
 
@@ -355,6 +533,18 @@ export function createVisualizer(mount) {
       // ========================================
 
       vec2 uv = gl_PointCoord - vec2(0.5);
+
+      // 直径1px未満の場合は
+      // カバー率で透明度を補正
+      float coverage = min(
+        1.0,
+        vPointDiameter * vPointDiameter
+      );
+
+      // ポイントが0以下なら非表示
+      if (vPointDiameter <= 0.0) {
+        discard;
+      }
 
       if (dot(uv, uv) > 0.25) {
         discard;
@@ -373,7 +563,7 @@ export function createVisualizer(mount) {
       );
 
       // ========================================
-      // 赤から白への変化
+      // 赤から白への色変化
       // ========================================
 
       vec3 color = mix(
@@ -384,7 +574,7 @@ export function createVisualizer(mount) {
 
       fragColor = vec4(
         color,
-        vAlpha
+        vAlpha * coverage
       );
     }
   `;
@@ -400,13 +590,20 @@ export function createVisualizer(mount) {
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
 
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    if (
+      !gl.getShaderParameter(
+        shader,
+        gl.COMPILE_STATUS
+      )
+    ) {
 
       const error = gl.getShaderInfoLog(shader);
 
       gl.deleteShader(shader);
 
-      throw new Error(error || "Shader compile error");
+      throw new Error(
+        error || "Shader compile error"
+      );
     }
 
     return shader;
@@ -433,11 +630,18 @@ export function createVisualizer(mount) {
 
   gl.linkProgram(program);
 
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+  if (
+    !gl.getProgramParameter(
+      program,
+      gl.LINK_STATUS
+    )
+  ) {
 
     const error = gl.getProgramInfoLog(program);
 
-    throw new Error(error || "Shader link error");
+    throw new Error(
+      error || "Shader link error"
+    );
   }
 
   gl.deleteShader(vertexShader);
@@ -449,92 +653,141 @@ export function createVisualizer(mount) {
   // Uniform取得
   // ========================================
 
-  const uTime = gl.getUniformLocation(
-    program, "uTime"
-  );
+  const getUniform = (name) =>
+    gl.getUniformLocation(program, name);
 
-  const uHeight = gl.getUniformLocation(
-    program, "uHeight"
-  );
+  const uniforms = {
 
-  const uPointSize = gl.getUniformLocation(
-    program, "uPointSize"
-  );
+    // 時間・画面
+    time: getUniform("uTime"),
+    height: getUniform("uHeight"),
+    pixelRatio: getUniform("uPixelRatio"),
 
-  const uNormalInitialAlpha = gl.getUniformLocation(
-    program, "uNormalInitialAlpha"
-  );
+    // 初期アルファ値
+    normalInitialAlpha:
+      getUniform("uNormalInitialAlpha"),
 
-  const uAttackInitialAlpha = gl.getUniformLocation(
-    program, "uAttackInitialAlpha"
-  );
+    attackInitialAlpha:
+      getUniform("uAttackInitialAlpha"),
 
-  const uNormalAlphaDecay = gl.getUniformLocation(
-    program, "uNormalAlphaDecay"
-  );
+    // アルファ減衰
+    normalAlphaDecay:
+      getUniform("uNormalAlphaDecay"),
 
-  const uAttackAlphaDecay = gl.getUniformLocation(
-    program, "uAttackAlphaDecay"
-  );
+    attackAlphaDecay:
+      getUniform("uAttackAlphaDecay"),
 
-  const uMinAlpha = gl.getUniformLocation(
-    program, "uMinAlpha"
-  );
+    minAlpha:
+      getUniform("uMinAlpha"),
 
-  const uNormalSpeedHalfLife = gl.getUniformLocation(
-    program, "uNormalSpeedHalfLife"
-  );
+    // 移動速度の半減期
+    normalSpeedHalfLife:
+      getUniform("uNormalSpeedHalfLife"),
 
-  const uAttackSpeedHalfLife = gl.getUniformLocation(
-    program, "uAttackSpeedHalfLife"
-  );
+    attackSpeedHalfLife:
+      getUniform("uAttackSpeedHalfLife"),
 
-  const uNormalColorHalfLife = gl.getUniformLocation(
-    program, "uNormalColorHalfLife"
-  );
+    // 色変化
+    normalColorHalfLife:
+      getUniform("uNormalColorHalfLife"),
+
+    // 通常パーティクルサイズ
+    normalInitialSize:
+      getUniform("uNormalInitialSize"),
+
+    normalFinalSize:
+      getUniform("uNormalFinalSize"),
+
+    normalSizeCurve:
+      getUniform("uNormalSizeCurve"),
+
+    // アタックパーティクルサイズ
+    attackInitialSize:
+      getUniform("uAttackInitialSize"),
+
+    attackFinalSize:
+      getUniform("uAttackFinalSize"),
+
+    attackSizeCurve:
+      getUniform("uAttackSizeCurve"),
+  };
 
   // ========================================
   // Uniform設定
   // ========================================
 
   gl.uniform1f(
-    uNormalInitialAlpha,
+    uniforms.normalInitialAlpha,
     NORMAL_INITIAL_ALPHA
   );
 
   gl.uniform1f(
-    uAttackInitialAlpha,
+    uniforms.attackInitialAlpha,
     ATTACK_INITIAL_ALPHA
   );
 
   gl.uniform1f(
-    uNormalAlphaDecay,
+    uniforms.normalAlphaDecay,
     NORMAL_ALPHA_DECAY
   );
 
   gl.uniform1f(
-    uAttackAlphaDecay,
+    uniforms.attackAlphaDecay,
     ATTACK_ALPHA_DECAY
   );
 
   gl.uniform1f(
-    uMinAlpha,
+    uniforms.minAlpha,
     PARTICLE_MIN_ALPHA
   );
 
   gl.uniform1f(
-    uNormalSpeedHalfLife,
+    uniforms.normalSpeedHalfLife,
     NORMAL_SPEED_HALF_LIFE
   );
 
   gl.uniform1f(
-    uAttackSpeedHalfLife,
+    uniforms.attackSpeedHalfLife,
     ATTACK_SPEED_HALF_LIFE
   );
 
   gl.uniform1f(
-    uNormalColorHalfLife,
+    uniforms.normalColorHalfLife,
     NORMAL_COLOR_HALF_LIFE
+  );
+
+  // ========================================
+  // サイズ関連Uniform
+  // ========================================
+
+  gl.uniform1f(
+    uniforms.normalInitialSize,
+    NORMAL_INITIAL_SIZE
+  );
+
+  gl.uniform1f(
+    uniforms.normalFinalSize,
+    NORMAL_FINAL_SIZE
+  );
+
+  gl.uniform1f(
+    uniforms.normalSizeCurve,
+    NORMAL_SIZE_CURVE
+  );
+
+  gl.uniform1f(
+    uniforms.attackInitialSize,
+    ATTACK_INITIAL_SIZE
+  );
+
+  gl.uniform1f(
+    uniforms.attackFinalSize,
+    ATTACK_FINAL_SIZE
+  );
+
+  gl.uniform1f(
+    uniforms.attackSizeCurve,
+    ATTACK_SIZE_CURVE
   );
 
   // ========================================
@@ -544,15 +797,19 @@ export function createVisualizer(mount) {
   const FLOATS_PER_PARTICLE = 4;
 
   const BYTES_PER_PARTICLE =
-    FLOATS_PER_PARTICLE * Float32Array.BYTES_PER_ELEMENT;
+    FLOATS_PER_PARTICLE *
+    Float32Array.BYTES_PER_ELEMENT;
 
   const vao = gl.createVertexArray();
   const particleBuffer = gl.createBuffer();
 
   gl.bindVertexArray(vao);
-  gl.bindBuffer(gl.ARRAY_BUFFER, particleBuffer);
 
-  // 最大200万個分のGPU領域を確保
+  gl.bindBuffer(
+    gl.ARRAY_BUFFER,
+    particleBuffer
+  );
+
   gl.bufferData(
     gl.ARRAY_BUFFER,
     MAX_PARTICLES * BYTES_PER_PARTICLE,
@@ -576,7 +833,6 @@ export function createVisualizer(mount) {
   // パーティクル管理
   // ========================================
 
-  // 各粒子がアルファ下限に到達する時刻
   const expirationTimes = new Float64Array(
     MAX_PARTICLES
   );
@@ -585,13 +841,15 @@ export function createVisualizer(mount) {
   let writeIndex = 0;
   let particleCount = 0;
 
-  // GPU転送用の一時バッファ
   let staging = new Float32Array(0);
 
   const startTime = performance.now();
 
   function getTime() {
-    return (performance.now() - startTime) / 1000;
+
+    return (
+      performance.now() - startTime
+    ) / 1000;
   }
 
   // ========================================
@@ -604,27 +862,19 @@ export function createVisualizer(mount) {
     now
   ) {
 
-    // 最初から下限以下なら即座に消滅
     if (initialAlpha <= PARTICLE_MIN_ALPHA) {
       return now;
     }
 
-    // 減衰倍率1なら消滅しない
     if (decay === 1) {
       return Infinity;
     }
-
-    // initialAlpha * decay^(time*60) = minAlpha
-    //
-    // この式から消滅時刻を求める
 
     const frames =
       Math.log(PARTICLE_MIN_ALPHA / initialAlpha) /
       Math.log(decay);
 
-    const seconds = frames / 60;
-
-    return now + seconds;
+    return now + frames / 60;
   }
 
   // ========================================
@@ -666,11 +916,14 @@ export function createVisualizer(mount) {
 
     gl.useProgram(program);
 
-    gl.uniform1f(uHeight, height);
+    gl.uniform1f(
+      uniforms.height,
+      height
+    );
 
     gl.uniform1f(
-      uPointSize,
-      PARTICLE_SIZE * dpr
+      uniforms.pixelRatio,
+      dpr
     );
   }
 
@@ -685,9 +938,6 @@ export function createVisualizer(mount) {
 
   function expireParticles(now) {
 
-    // リングバッファの先頭から、
-    // 消滅済みのパーティクルを取り除く
-
     while (particleCount > 0) {
 
       if (now < expirationTimes[head]) {
@@ -700,9 +950,8 @@ export function createVisualizer(mount) {
       particleCount--;
     }
 
-    // 赤白で減衰率が異なるため、
-    // 途中に消滅済みの粒子が残る場合もある。
-    // それらはGPU側のアルファ判定で非表示にする。
+    // 赤白で減衰率が違う場合、
+    // 途中の消滅済み粒子はGPUで非表示。
   }
 
   // ========================================
@@ -734,7 +983,7 @@ export function createVisualizer(mount) {
     const attackFlag = attack ? 1 : 0;
 
     // ========================================
-    // 赤白ごとの減衰設定
+    // 赤白ごとのアルファ減衰設定
     // ========================================
 
     const initialAlpha = attack
@@ -745,7 +994,6 @@ export function createVisualizer(mount) {
       ? ATTACK_ALPHA_DECAY
       : NORMAL_ALPHA_DECAY;
 
-    // このフレームで生成する粒子の消滅時刻
     const expirationTime = calculateExpirationTime(
       initialAlpha,
       alphaDecay,
@@ -780,7 +1028,6 @@ export function createVisualizer(mount) {
       const offset =
         i * FLOATS_PER_PARTICLE;
 
-      // GPUへ渡すデータ
       staging[offset] = xRatio;
       staging[offset + 1] = velocity;
       staging[offset + 2] = now;
@@ -810,8 +1057,8 @@ export function createVisualizer(mount) {
       )
     );
 
-    // リングバッファを折り返す場合
-    const remaining = spawnCount - firstCount;
+    const remaining =
+      spawnCount - firstCount;
 
     if (remaining > 0) {
 
@@ -846,7 +1093,6 @@ export function createVisualizer(mount) {
       particleCount + spawnCount - MAX_PARTICLES
     );
 
-    // 上限を超える場合は古い粒子を上書き
     head =
       (head + overflow) % MAX_PARTICLES;
 
@@ -882,13 +1128,9 @@ export function createVisualizer(mount) {
     gl.bindVertexArray(vao);
 
     gl.uniform1f(
-      uTime,
+      uniforms.time,
       now
     );
-
-    // ========================================
-    // アルファブレンディング
-    // ========================================
 
     gl.enable(gl.BLEND);
 
@@ -943,17 +1185,14 @@ export function createVisualizer(mount) {
         audio.attackTriggered
       );
 
-      // アルファ下限に達した粒子を管理
       expireParticles(now);
 
-      // 毎フレーム粒子を生成
       spawnParticles(
         waveform,
         attack,
         now
       );
 
-      // GPUで移動・減衰・描画
       drawParticles(now);
     },
 

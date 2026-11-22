@@ -254,3 +254,34 @@ select {
 .source-screen:not(.is-hidden) ~ .menu-hotspot {
   display: none;
 }
+
+/* dB 数値入力とデバイス別初期値の表示 */
+.device-profile-note {
+  margin: 12px 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.setting-number-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.setting-number-row input[type="number"] {
+  width: 110px;
+  padding: 7px 9px;
+  background: #1b2230;
+  border: 1px solid var(--edge);
+  border-radius: 5px;
+  color: var(--txt);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.setting-number-row input[type="number"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

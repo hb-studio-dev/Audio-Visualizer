@@ -1,26 +1,47 @@
-// 音声解析は描画処理から独立。全しきい値はUIから変更可能。
-export const DEFAULT_SETTINGS = Object.freeze({
-  inputGain: 1,
-  attackThreshold: 0.028,
-  lowAttackThreshold: 0.022,
-  midAttackThreshold: 0.024,
-  highAttackThreshold: 0.026,
-  peakThreshold: 0.72,
+// 音声解析エンジン。サイドメニューからの設定値は dB 単位。
+// しきい値の dB は振幅の基準値 1.0 = 0 dBFS として扱う。
+export const dbToAmplitude = (db) => Math.pow(10, db / 20);
+export const amplitudeToDb = (value) => 20 * Math.log10(Math.max(value, 1e-12));
+
+// しきい値は添付元コードの線形値を dBFS 換算し、検出感度を維持。
+export const DEFAULT_THRESHOLDS_DB = Object.freeze({
+  attackThresholdDb: amplitudeToDb(0.028),
+  lowAttackThresholdDb: amplitudeToDb(0.022),
+  midAttackThresholdDb: amplitudeToDb(0.024),
+  highAttackThresholdDb: amplitudeToDb(0.026),
+  peakThresholdDb: amplitudeToDb(0.72),
 });
+
+export const DEFAULT_SETTINGS = Object.freeze({
+  inputGainDb: 18,
+  ...DEFAULT_THRESHOLDS_DB,
+});
+
+export const DEVICE_DEFAULT_SETTINGS = Object.freeze({
+  desktop: Object.freeze({ ...DEFAULT_SETTINGS, inputGainDb: 0 }),
+  mobile: Object.freeze({ ...DEFAULT_SETTINGS, inputGainDb: 70 }),
+});
+
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const rms = (data) =>
-  Math.sqrt(data.reduce((s, x) => s + x * x, 0) / data.length);
+  Math.sqrt(data.reduce((sum, value) => sum + value * value, 0) / data.length);
+
 export class AudioAnalyser {
   constructor(settings = {}) {
-    this.settings = { ...DEFAULT_SETTINGS, ...settings };
     this.ctx = null;
     this.stream = null;
+    this.gainNode = null;
     this.nodes = [];
     this.sampleBuffers = [];
     this.previous = { full: 0, low: 0, mid: 0, high: 0 };
     this.waveform = new Float32Array(1024);
+    this.settings = { ...DEFAULT_SETTINGS };
+    this.thresholds = {};
+    this.inputGain = 1;
+    this.setSettings(settings);
     this.analysis = this.emptyAnalysis();
   }
+
   emptyAnalysis() {
     return {
       volume: 0,
@@ -38,10 +59,20 @@ export class AudioAnalyser {
       waveform: this.waveform,
     };
   }
-  setSettings(settings) {
+
+  setSettings(settings = {}) {
     this.settings = { ...this.settings, ...settings };
-    if (this.gainNode) this.gainNode.gain.value = this.settings.inputGain;
+    this.inputGain = dbToAmplitude(this.settings.inputGainDb);
+    this.thresholds = {
+      attack: dbToAmplitude(this.settings.attackThresholdDb),
+      low: dbToAmplitude(this.settings.lowAttackThresholdDb),
+      mid: dbToAmplitude(this.settings.midAttackThresholdDb),
+      high: dbToAmplitude(this.settings.highAttackThresholdDb),
+      peak: dbToAmplitude(this.settings.peakThresholdDb),
+    };
+    if (this.gainNode) this.gainNode.gain.value = this.inputGain;
   }
+
   async useStream(stream) {
     await this.stop();
     const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -49,11 +80,12 @@ export class AudioAnalyser {
     const ctx = new Ctx();
     this.ctx = ctx;
     this.stream = stream;
-    const source = ctx.createMediaStreamSource(stream),
-      gain = ctx.createGain();
-    gain.gain.value = this.settings.inputGain;
+    const source = ctx.createMediaStreamSource(stream);
+    const gain = ctx.createGain();
+    gain.gain.value = this.inputGain;
     this.gainNode = gain;
     source.connect(gain);
+
     const createBand = (type, frequency) => {
       const filter = ctx.createBiquadFilter();
       filter.type = type;
@@ -62,20 +94,20 @@ export class AudioAnalyser {
       gain.connect(filter);
       return filter;
     };
-    const low = createBand("lowpass", 250),
-      midLow = createBand("highpass", 250),
-      midHigh = ctx.createBiquadFilter();
+    const low = createBand("lowpass", 250);
+    const midLow = createBand("highpass", 250);
+    const midHigh = ctx.createBiquadFilter();
     midHigh.type = "lowpass";
     midHigh.frequency.value = 4000;
     midLow.connect(midHigh);
     const high = createBand("highpass", 4000);
     const sources = [gain, low, midHigh, high];
     this.nodes = sources.map((node) => {
-      const a = ctx.createAnalyser();
-      a.fftSize = 1024;
-      a.smoothingTimeConstant = 0;
-      node.connect(a);
-      return a;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0;
+      node.connect(analyser);
+      return analyser;
     });
     this.sampleBuffers = this.nodes.map(() => new Float32Array(1024));
     this.waveform = this.sampleBuffers[0];
@@ -83,6 +115,7 @@ export class AudioAnalyser {
     this.analysis = this.emptyAnalysis();
     await ctx.resume();
   }
+
   getAnalysis() {
     if (!this.ctx || !this.nodes.length) return this.analysis;
     const values = this.nodes.map((node, i) => {
@@ -90,34 +123,37 @@ export class AudioAnalyser {
       return rms(this.sampleBuffers[i]);
     });
     const [full, low, mid, high] = values;
-    const raw = full / Math.max(this.settings.inputGain, 0.00001);
-    // Attackは前フレームからの正のRMS変化。しきい値は線形値（dBではない）。
-    const attack = Math.max(0, full - this.previous.full),
-      lowAttack = Math.max(0, low - this.previous.low),
-      midAttack = Math.max(0, mid - this.previous.mid),
-      highAttack = Math.max(0, high - this.previous.high);
+    const raw = full / Math.max(this.inputGain, 1e-12);
+    // Attack は前フレームとの正の RMS 差。振幅を dBFS 換算したしきい値で判定。
+    const attack = Math.max(0, full - this.previous.full);
+    const lowAttack = Math.max(0, low - this.previous.low);
+    const midAttack = Math.max(0, mid - this.previous.mid);
+    const highAttack = Math.max(0, high - this.previous.high);
     Object.assign(this.previous, { full, low, mid, high });
     let peak = 0;
-    for (const s of this.sampleBuffers[0]) peak = Math.max(peak, Math.abs(s));
+    for (const sample of this.sampleBuffers[0]) {
+      peak = Math.max(peak, Math.abs(sample));
+    }
     this.analysis = {
       volume: clamp(full, 0, 1),
       rawVolume: raw,
       attack,
-      attackTriggered: attack >= this.settings.attackThreshold,
+      attackTriggered: attack >= this.thresholds.attack,
       lowAttack,
-      lowAttackTriggered: lowAttack >= this.settings.lowAttackThreshold,
+      lowAttackTriggered: lowAttack >= this.thresholds.low,
       midAttack,
-      midAttackTriggered: midAttack >= this.settings.midAttackThreshold,
+      midAttackTriggered: midAttack >= this.thresholds.mid,
       highAttack,
-      highAttackTriggered: highAttack >= this.settings.highAttackThreshold,
+      highAttackTriggered: highAttack >= this.thresholds.high,
       peak,
-      peakTriggered: peak >= this.settings.peakThreshold,
+      peakTriggered: peak >= this.thresholds.peak,
       waveform: this.waveform,
     };
     return this.analysis;
   }
+
   async stop() {
-    if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
+    if (this.stream) this.stream.getTracks().forEach((track) => track.stop());
     if (this.ctx) await this.ctx.close().catch(() => {});
     this.ctx = null;
     this.stream = null;
@@ -125,6 +161,7 @@ export class AudioAnalyser {
     this.sampleBuffers = [];
     this.waveform = new Float32Array(1024);
     this.gainNode = null;
+    this.previous = { full: 0, low: 0, mid: 0, high: 0 };
     this.analysis = this.emptyAnalysis();
   }
 }
