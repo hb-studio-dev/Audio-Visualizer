@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#090b12" />
+    <title>Audio Visualizer Template</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main id="visualizerRoot" aria-label="オーディオビジュアライザー">
+      <div id="visualizerMount"></div>
+      <div id="sourceScreen" class="source-screen">
+        <div class="source-card">
+          <h1>AUDIO SOURCE</h1>
+          <p>入力デバイスを選択してください</p>
+          <label for="initialDeviceSelect">INPUT DEVICE</label>
+          <select id="initialDeviceSelect" disabled>
+            <option>入力デバイスを取得しています…</option>
+          </select>
+          <button id="setSourceButton" class="primary" disabled>SET</button>
+          <p id="sourceStatus" class="status" role="status">
+            マイクへのアクセス許可が必要です。
+          </p>
+        </div>
+      </div>
+      <div id="menuHotspot" class="menu-hotspot">
+        <button
+          id="fullscreenButton"
+          class="fullscreen-button"
+          type="button"
+          aria-label="全画面表示にする"
+          title="全画面表示にする"
+          aria-pressed="false"
+        >
+          <svg
+            class="fullscreen-enter"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5" />
+          </svg>
+          <svg
+            class="fullscreen-exit"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M3 9h6V3M21 9h-6V3M3 15h6v6M21 15h-6v6" />
+          </svg>
+        </button>
+        <button
+          id="menuButton"
+          class="hamburger"
+          aria-expanded="false"
+          aria-controls="settingsPanel"
+          aria-label="設定を開く"
+        >
+          <span></span><span></span><span></span>
+        </button>
+      </div>
+      <div id="settingsBackdrop" class="backdrop" hidden></div>
+      <aside
+        id="settingsPanel"
+        class="settings-panel"
+        aria-label="ビジュアライザー設定"
+        aria-hidden="true"
+        inert
+      >
+        <div class="panel-top">
+          <h2>SETTINGS</h2>
+          <button
+            id="closeSettingsButton"
+            aria-label="設定を閉じる"
+            class="close-button"
+          >
+            ×
+          </button>
+        </div>
+        <section>
+          <h3>AUDIO SOURCE</h3>
+          <label for="settingsDeviceSelect">入力デバイス</label>
+          <select id="settingsDeviceSelect"></select>
+          <button id="applySourceButton">ソースを切り替える</button>
+          <p id="settingsStatus" class="status" role="status"></p>
+        </section>
+        <section id="controlsSection">
+          <h3>AUDIO ANALYSIS</h3>
+          <div id="analysisControls"></div>
+        </section>
+        <button id="resetSettingsButton" class="reset-button">
+          解析設定を初期値に戻す
+        </button>
+      </aside>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
