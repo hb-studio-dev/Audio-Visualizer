@@ -19,7 +19,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
 
 export const DEVICE_DEFAULT_SETTINGS = Object.freeze({
   desktop: Object.freeze({ ...DEFAULT_SETTINGS, inputGainDb: 0 }),
-  mobile: Object.freeze({ ...DEFAULT_SETTINGS, inputGainDb: 70 }),
+  mobile: Object.freeze({ ...DEFAULT_SETTINGS, inputGainDb: 35 }),
 });
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
