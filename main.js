@@ -1,6 +1,6 @@
-import { AudioAnalyser } from "./audio/audioAnalyser.js";
+import { AudioAnalyser } from "./audio/audioAnalyser.js?v=meter-clean-v3";
 import { AudioSelector } from "./audio/audioSelector.js";
-import { SettingsMenu } from "./ui/settingsMenu.js";
+import { SettingsMenu } from "./ui/settingsMenu.js?v=meter-clean-v3";
 // ★ 新しいページで差し替えるのは、基本的にこの1行だけ
 import { createVisualizer } from "./visualizers/particle-wave.js";
 
@@ -43,18 +43,43 @@ syncFullscreenButton();
 let running = false,
   lastTime = 0,
   rafId = 0;
+let visualizerErrorLogged = false;
+
 function render(time) {
   if (!running) return;
+  // 次の更新は最初に予約。描画エラーで監視が止まらないようにする。
+  rafId = requestAnimationFrame(render);
   const dt = lastTime ? Math.min((time - lastTime) / 1000, 0.1) : 0;
   lastTime = time;
-  renderer.update(analyser.getAnalysis(), dt);
-  rafId = requestAnimationFrame(render);
+  let analysis;
+  try {
+    analysis = analyser.getAnalysis();
+  } catch (error) {
+    console.error("音声解析エラー:", error);
+    return;
+  }
+  // 解析結果はレンダラーと監視UIに同一オブジェクトを渡す。
+  // フレーム間引きなし。検出イベントの取りこぼしを防ぐ。
+  try {
+    menu.updateMonitoring(analysis, Boolean(analyser.ctx));
+  } catch (error) {
+    console.error("入力メーター更新エラー:", error);
+  }
+  try {
+    renderer.update(analysis, dt);
+  } catch (error) {
+    if (!visualizerErrorLogged) {
+      console.error("ビジュアライザー描画エラー（メーターは継続します）:", error);
+      visualizerErrorLogged = true;
+    }
+  }
 }
 function status(message) {
   $("sourceStatus").textContent = message;
   $("settingsStatus").textContent = message;
 }
 async function selectStream(deviceId) {
+  menu.resetMonitoring();
   const stream = await selector.open(deviceId);
   try {
     await analyser.useStream(stream);

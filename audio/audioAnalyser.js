@@ -19,7 +19,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
 
 export const DEVICE_DEFAULT_SETTINGS = Object.freeze({
   desktop: Object.freeze({ ...DEFAULT_SETTINGS, inputGainDb: 0 }),
-  mobile: Object.freeze({ ...DEFAULT_SETTINGS, inputGainDb: 35 }),
+  mobile: Object.freeze({ ...DEFAULT_SETTINGS, inputGainDb: 30 }),
 });
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -31,6 +31,7 @@ export class AudioAnalyser {
     this.ctx = null;
     this.stream = null;
     this.gainNode = null;
+    this.silentSink = null;
     this.nodes = [];
     this.sampleBuffers = [];
     this.previous = { full: 0, low: 0, mid: 0, high: 0 };
@@ -45,6 +46,7 @@ export class AudioAnalyser {
   emptyAnalysis() {
     return {
       volume: 0,
+      inputLevel: 0, // ゲイン適用後のRMS（表示用、1を超える場合あり）
       rawVolume: 0,
       attack: 0,
       attackTriggered: false,
@@ -109,6 +111,13 @@ export class AudioAnalyser {
       node.connect(analyser);
       return analyser;
     });
+    // Web Audio のグラフを常時処理させるため、無音の終端へ接続する。
+    // 出力ゲインは0なのでスピーカーから音は出ない。
+    const silentSink = ctx.createGain();
+    silentSink.gain.value = 0;
+    this.nodes.forEach((node) => node.connect(silentSink));
+    silentSink.connect(ctx.destination);
+    this.silentSink = silentSink;
     this.sampleBuffers = this.nodes.map(() => new Float32Array(1024));
     this.waveform = this.sampleBuffers[0];
     this.previous = { full: 0, low: 0, mid: 0, high: 0 };
@@ -136,6 +145,7 @@ export class AudioAnalyser {
     }
     this.analysis = {
       volume: clamp(full, 0, 1),
+      inputLevel: full,
       rawVolume: raw,
       attack,
       attackTriggered: attack >= this.thresholds.attack,
@@ -161,6 +171,7 @@ export class AudioAnalyser {
     this.sampleBuffers = [];
     this.waveform = new Float32Array(1024);
     this.gainNode = null;
+    this.silentSink = null;
     this.previous = { full: 0, low: 0, mid: 0, high: 0 };
     this.analysis = this.emptyAnalysis();
   }

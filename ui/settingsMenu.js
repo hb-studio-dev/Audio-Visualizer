@@ -71,6 +71,11 @@ export class SettingsMenu {
     this.defaults = { ...DEVICE_DEFAULT_SETTINGS[this.deviceProfile] };
     this.values = this.loadValues();
     this.inputs = new Map();
+    this.indicators = new Map();
+    this.litUntil = new Map();
+    this.meterLevel = null;
+    this.meterValue = null;
+    this.meterFill = null;
 
     this.button = document.getElementById("menuButton");
     this.panel = document.getElementById("settingsPanel");
@@ -102,6 +107,16 @@ export class SettingsMenu {
       const title = document.createElement("span");
       title.textContent = def.label;
       const output = document.createElement("output");
+      // しきい値に対応する検出ランプ（入力ゲインには付けない）
+      if (def.key !== "inputGainDb") {
+        const lamp = document.createElement("span");
+        lamp.className = "detection-lamp";
+        lamp.setAttribute("role", "status");
+        lamp.setAttribute("aria-label", `${def.label}: 未検出`);
+        lamp.title = "検出時に点灯";
+        title.append(" ", lamp);
+        this.indicators.set(def.key, lamp);
+      }
       label.append(title, output);
 
       const range = document.createElement("input");
@@ -128,6 +143,27 @@ export class SettingsMenu {
       help.textContent = def.description;
       row.append(label, range, numberRow, help);
       controls.append(row);
+      if (def.key === "inputGainDb") {
+        // ゲイン調整のすぐ下に、解析系に入った実際の音量を表示
+        const meter = document.createElement("div");
+        meter.className = "input-level-meter";
+        meter.innerHTML = `
+          <div class="meter-heading">
+            <span>入力レベル（ゲイン適用後）</span>
+            <output class="meter-reading" aria-label="現在の入力レベル">−∞ dBFS</output>
+          </div>
+          <div class="meter-track" role="meter" aria-label="入力レベル" aria-valuemin="-70" aria-valuemax="12" aria-valuenow="-70" aria-valuetext="無音">
+            <div class="meter-fill"></div>
+            <div class="meter-zero"></div>
+          </div>
+          <div class="meter-ticks"><span>−70</span><span>−40</span><span>−20</span><span>0</span><span>+12 dBFS</span></div>
+          <small>ゲインを調整し、通常時は0 dBFS以下を目安にしてください。</small>
+        `;
+        row.append(meter);
+        this.meterLevel = meter.querySelector(".meter-track");
+        this.meterValue = meter.querySelector(".meter-reading");
+        this.meterFill = meter.querySelector(".meter-fill");
+      }
       this.inputs.set(def.key, { range, number, output });
 
       range.addEventListener("input", () => this.change(def, range.value));
@@ -198,6 +234,77 @@ export class SettingsMenu {
       localStorage.setItem(this.storageKey, JSON.stringify(this.values));
     } catch {}
     this.onSettingsChange({ ...this.values });
+  }
+
+  // 同じフレームでビジュアライザーに渡す解析オブジェクトを監視UIへ反映。
+  // メニューが閉じていても状態を受け取り続けることで、再度開いた時にも値を確認できる。
+  updateMonitoring(analysis, connected = true) {
+
+    // 解析器が返すinputLevelを優先。旧版データとの互換性のため
+    // waveform/volumeもフォールバックに使う。
+    let level = Number(analysis?.inputLevel);
+    if (!Number.isFinite(level) || level <= 0) {
+      const wave = analysis?.waveform;
+      if (wave && wave.length) {
+        let power = 0;
+        for (let i = 0; i < wave.length; i++) power += wave[i] * wave[i];
+        level = Math.sqrt(power / wave.length);
+      }
+      if (!(level > 0)) level = Math.max(0, Number(analysis?.volume) || 0);
+    }
+    if (!connected) level = 0;
+
+    const db = level > 0 ? 20 * Math.log10(level) : -Infinity;
+    const shownDb = Number.isFinite(db) ? Math.max(-70, Math.min(12, db)) : -70;
+    const percent = ((shownDb + 70) / 82) * 100;
+    const readout = Number.isFinite(db)
+      ? `${db > 0 ? "+" : ""}${db.toFixed(1)} dBFS`
+      : "−∞ dBFS";
+
+    if (this.meterFill) {
+      this.meterFill.style.width = `${percent}%`;
+      this.meterFill.classList.toggle("is-over", db >= 0);
+    }
+    if (this.meterValue) {
+      this.meterValue.textContent = readout;
+      this.meterValue.classList.toggle("is-over", db >= 0);
+    }
+    if (this.meterLevel) {
+      this.meterLevel.setAttribute("aria-valuenow", String(shownDb));
+      this.meterLevel.setAttribute("aria-valuetext", readout);
+    }
+
+    const flags = {
+      attackThresholdDb: "attackTriggered",
+      lowAttackThresholdDb: "lowAttackTriggered",
+      midAttackThresholdDb: "midAttackTriggered",
+      highAttackThresholdDb: "highAttackTriggered",
+      peakThresholdDb: "peakTriggered",
+    };
+    const now = performance.now();
+    for (const [key, flag] of Object.entries(flags)) {
+      if (connected && analysis?.[flag]) this.litUntil.set(key, now + 250);
+      const lit = connected && now < (this.litUntil.get(key) ?? 0);
+      const lamp = this.indicators.get(key);
+      if (!lamp) continue;
+      lamp.classList.toggle("is-lit", lit);
+      const label = CONTROL_DEFS.find((def) => def.key === key).label;
+      lamp.setAttribute("aria-label", `${label}: ${lit ? "検出" : "未検出"}`);
+    }
+
+  }
+
+  resetMonitoring() {
+    this.litUntil.clear();
+    if (this.meterFill) {
+      this.meterFill.style.width = "0%";
+      this.meterFill.classList.remove("is-over");
+      this.meterValue.textContent = "−∞ dBFS";
+      this.meterValue.classList.remove("is-over");
+      this.meterLevel.setAttribute("aria-valuenow", "-70");
+      this.meterLevel.setAttribute("aria-valuetext", "無音");
+    }
+    for (const lamp of this.indicators.values()) lamp.classList.remove("is-lit");
   }
 
   setOpen(open) {
