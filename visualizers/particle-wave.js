@@ -34,7 +34,7 @@ export function createVisualizer(mount) {
   // アタックパーティクル
   const ATTACK_INITIAL_SIZE = 3.0;
   const ATTACK_FINAL_SIZE = 1.5;
-  const ATTACK_SIZE_CURVE = 3.0;
+  const ATTACK_SIZE_CURVE = 50.0;
 
   // SIZE_CURVE:
   // 0 = 直線的に変化
@@ -57,7 +57,7 @@ export function createVisualizer(mount) {
   // ========================================
 
   // 60fps基準で毎フレーム掛ける倍率
-  const NORMAL_ALPHA_DECAY = 0.997;
+  const NORMAL_ALPHA_DECAY = 0.998;
   const ATTACK_ALPHA_DECAY = 0.999;
 
   // この値以下になったら消滅
