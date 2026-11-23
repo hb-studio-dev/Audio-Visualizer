@@ -55,7 +55,7 @@ export function createVisualizer(mount) {
   const NORMAL_ALPHA_DECAY = 0.998;
   const ATTACK_ALPHA_DECAY = 0.999;
 
-  const PARTICLE_MIN_ALPHA = 0.000001;
+  const PARTICLE_MIN_ALPHA = 0.0001;
 
   // ========================================
   // 移動速度の指数減衰
