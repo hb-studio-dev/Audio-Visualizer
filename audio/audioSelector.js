@@ -4,19 +4,23 @@ export class AudioSelector {
     this.devices = [];
   }
 
+  // Call only after microphone access has been granted on startup. Browsers
+  // can hide device labels and all but the default input before permission.
   async refresh() {
     if (!navigator.mediaDevices?.enumerateDevices) {
-      throw new Error("HTTPSまたはlocalhostで開いてください。");
+      throw new Error("Open this page over HTTPS or localhost.");
     }
+
     const devices = await navigator.mediaDevices.enumerateDevices();
     this.devices = devices.filter((device) => device.kind === "audioinput");
+
     for (const select of this.selects) {
       const selectedId = select.value;
       select.replaceChildren();
       for (const [index, device] of this.devices.entries()) {
         const option = document.createElement("option");
         option.value = device.deviceId;
-        option.textContent = device.label || `マイク ${index + 1}`;
+        option.textContent = device.label || `Microphone ${index + 1}`;
         select.append(option);
       }
       select.disabled = this.devices.length === 0;
@@ -27,12 +31,12 @@ export class AudioSelector {
     return this.devices;
   }
 
+  // No deviceId: request microphone permission and the system's default input.
+  // With a deviceId: insist on that exact input, never silently substitute one.
   async open(deviceId) {
     if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error("HTTPSまたはlocalhostで開いてください。");
+      throw new Error("Open this page over HTTPS or localhost.");
     }
-    // ideal は希望条件なので、要求したデバイス以外が選ばれても成功してしまう。
-    // exact で一致する入力だけを取得し、存在しなければ失敗として知らせる。
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: false,
@@ -45,9 +49,11 @@ export class AudioSelector {
     const track = stream.getAudioTracks()[0];
     if (!track) {
       stream.getTracks().forEach((t) => t.stop());
-      throw new Error("指定したデバイスから音声を取得できませんでした。");
+      throw new Error("No audio track was returned by the selected input.");
     }
-    // Chrome等で deviceId の別名になる「default」「communications」は除外。
+
+    // 'default' and 'communications' are browser-provided aliases, not IDs
+    // that necessarily match the physical device returned by getSettings().
     const actualId = track.getSettings?.().deviceId;
     if (
       deviceId &&
@@ -56,7 +62,7 @@ export class AudioSelector {
       actualId !== deviceId
     ) {
       stream.getTracks().forEach((t) => t.stop());
-      throw new Error("選択した入力デバイスと実際の入力デバイスが一致しません。");
+      throw new Error("The browser opened a different input than the one selected.");
     }
     return stream;
   }
@@ -64,7 +70,6 @@ export class AudioSelector {
   syncToStream(stream, requestedId) {
     const track = stream.getAudioTracks()[0];
     const actualId = track?.getSettings?.().deviceId;
-    // ブラウザが認識している接続先を、初期画面・設定画面の両方に反映。
     const deviceId = [actualId, requestedId].find((id) =>
       this.devices.some((device) => device.deviceId === id),
     );
@@ -74,7 +79,7 @@ export class AudioSelector {
     return (
       track?.label ||
       this.devices.find((device) => device.deviceId === deviceId)?.label ||
-      "マイク"
+      "Microphone"
     );
   }
 }

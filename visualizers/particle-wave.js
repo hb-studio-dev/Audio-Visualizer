@@ -108,7 +108,7 @@ export function createVisualizer(mount) {
     ATTACK_ALPHA_DECAY > 1
   ) {
     throw new Error(
-      "アルファ減衰倍率は0より大きく1以下にしてください。"
+      "Alpha decay must be greater than 0 and at most 1."
     );
   }
 
@@ -117,7 +117,7 @@ export function createVisualizer(mount) {
     PARTICLE_MIN_ALPHA >= 1
   ) {
     throw new Error(
-      "PARTICLE_MIN_ALPHAは0より大きく1未満にしてください。"
+      "PARTICLE_MIN_ALPHA must be greater than 0 and less than 1."
     );
   }
 
@@ -128,7 +128,7 @@ export function createVisualizer(mount) {
     ATTACK_FINAL_SIZE < 0
   ) {
     throw new Error(
-      "パーティクルサイズは0以上にしてください。"
+      "Particle sizes must be zero or greater."
     );
   }
 
@@ -137,13 +137,13 @@ export function createVisualizer(mount) {
     ATTACK_SIZE_CURVE < 0
   ) {
     throw new Error(
-      "SIZE_CURVEは0以上にしてください。"
+      "SIZE_CURVE must be zero or greater."
     );
   }
 
   if (PARTICLE_SPACING <= 0) {
     throw new Error(
-      "PARTICLE_SPACINGは0より大きくしてください。"
+      "PARTICLE_SPACING must be greater than 0."
     );
   }
 
@@ -186,7 +186,7 @@ export function createVisualizer(mount) {
       mount.style.position = originalPosition;
     }
 
-    throw new Error("WebGL2が利用できません。");
+    throw new Error("WebGL2 is not available.");
   }
 
   // ========================================

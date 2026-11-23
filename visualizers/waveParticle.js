@@ -60,7 +60,7 @@ export function createVisualizer(mount) {
   });
 
   if (!ctx) {
-    throw new Error("Canvas 2D を利用できません。");
+    throw new Error("Canvas 2D is not available.");
   }
 
   canvas.style.display = "block";

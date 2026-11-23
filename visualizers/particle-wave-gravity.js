@@ -82,7 +82,7 @@ export function createVisualizer(mount) {
         GRAVITY_VOLUME_INFLUENCE > 1 ||
         GRAVITY_VOLUME_REFERENCE <= 0
     ) {
-        throw new Error("パラメータが不正です。");
+        throw new Error("Invalid visualizer parameter.");
     }
 
     const originalPosition = mount.style.position;
@@ -120,7 +120,7 @@ export function createVisualizer(mount) {
             mount.style.position = originalPosition;
         }
 
-        throw new Error("WebGL2が利用できません。");
+        throw new Error("WebGL2 is not available.");
     }
 
     const centerLine = document.createElement("div");
@@ -909,7 +909,7 @@ void main() {
 
         if (requestedHeight > textureLimit) {
             throw new Error(
-                "GPUのテクスチャ上限を超えました。"
+                "The GPU texture size limit was exceeded."
             );
         }
 

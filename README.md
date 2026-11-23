@@ -1,97 +1,90 @@
-# Audio Visualizer Template
+# Audio Visualizer
 
-以前のDeclarative Audio Visualizerの「音声入力と設定UI」という考え方を引き継いだ**新規の独立テンプレート**です。元プロジェクトのソースをそのまま抽出したものではありません。描画部分を差し替えて複数のページを作れます。
+A browser-based, microphone-driven audio visualizer. It uses Web Audio for
+analysis and a separate renderer in `visualizers/` for the animation.
 
-## 起動
+## Start
 
-ローカルでプロジェクトディレクトリに移動し `python3 -m http.server 8000` → `http://localhost:8000` で開く。またはHTTPS配信する。`file://` 直開きは不可。
+Run a local development server from this directory:
 
-## 新しいページを作成する
-
-1. テンプレートのフォルダを複製する。
-2. `visualizers/blank.js` を参考に自作アニメーションJS（例 `visualizers/myScene.js`）を作る。
-3. `main.js` の `import {createVisualizer} from './visualizers/example.js';` を `./visualizers/myScene.js` に変更する。
-4. それ以外のコードは変更不要。Canvas以外にThree.jsを使う場合も `createVisualizer(mount)` が `update(audio,dt)` と `dispose()` を返せばよい。
-
-## 全画面表示
-
-入力デバイスを SET で確定すると、画面右上の左側に全画面表示ボタンが出ます。クリックすると `#visualizerRoot` を全画面表示にし、同じボタンで解除できます。Escキーで解除した場合もアイコンが同期します。右上の設定メニューも全画面内で表示できます。Fullscreen API未対応の環境ではボタンが無効になります。ブラウザの制約により全画面表示できない場合があります。
-
-## 音声解析の値
-
-| キー | 内容 |
-| --- | --- |
-| `volume` | ゲイン調整後RMS（約0～1） |
-| `rawVolume` | ゲイン調整前のRMS |
-| `attack` / `attackTriggered` | 全帯域の正のRMS変化 / しきい値判定 |
-| `lowAttack` / `lowAttackTriggered` | 250Hz以下に近い帯域 |
-| `midAttack` / `midAttackTriggered` | 250～4000Hzに近い帯域 |
-| `highAttack` / `highAttackTriggered` | 4000Hz以上に近い帯域 |
-| `peak` / `peakTriggered` | 現フレームの最大振幅 / しきい値判定 |
-| `waveform` | `Float32Array(1024)`。入力ゲイン適用後の時間領域波形（通常 -1～+1 付近） |
-
-解析しきい値と入力ゲインは右上の設定パネルで変更し、ブラウザのlocalStorageに保存されます。同一オリジン内では設定を共有します。値は線形値でありdBではありません。これは旧コードの解析計算・設定値と完全互換ではありません。
-
-## 注意
-
-- マイク利用にはHTTPSまたはlocalhostが必要。OS/ブラウザの入力許可も必要です。
-- 別の描画コードには、`visualizers` のファイルのみ差し替えてください。
-- 実運用で旧ビジュアライザーと解析感度やUIを厳密に合わせるには、元ソースを参照して `audio/audioAnalyser.js` とCSSの調整が必要です。
-
-## 波形配列の利用例
-
-各フレームの `update(audio, dt)` から `audio.waveform` を参照できます。
-
-```js
-update(audio, dt) {
-  const samples = audio.waveform; // Float32Array、1024サンプル
-  const firstSample = samples[0];
-  // Canvas上に描画する等、自由に利用できます。
-}
+```bash
+python3 -m http.server 8000
 ```
 
-**注意:** 余計なメモリ割当を減らすため、波形配列はフレーム間で再利用されます。過去の波形を保持したい場合は `new Float32Array(audio.waveform)` でコピーしてください。サンプルの値は入力ゲインを反映しています。`waveform` は周波数スペクトルではなく時間領域のPCM波形です。
+Then visit `http://localhost:8000`, or deploy the directory to an **HTTPS**
+site such as GitHub Pages. Opening `index.html` as a `file://` URL will not
+provide a reliable microphone-permission environment.
 
-## dB設定・PC/スマートフォン別初期ゲイン（更新版）
+## Microphone selection (updated)
 
-- 入力ゲインは **PC +18 dB**、**スマートフォン +90 dB** を初期値とします。タッチ可能な端末で幅1024px以下をスマートフォンとして扱います（判定はページ読み込み時）。
-- 入力ゲイン範囲は -70 ～ +100 dB、各しきい値は -100 ～ +100 dB。すべて0.1 dB刻みで、スライダーと数値欄の両方から変更できます。
-- 入力ゲインは `10^(dB/20)` 倍、しきい値は **0 dBFS = 線形振幅1.0** として `10^(dB/20)` に変換します。Attackのしきい値は「前フレームからの正のRMS差」の振幅に対するdBFSです。+0 dBFSより高いしきい値では発火しにくいことがあります。
-- **元ZIPのしきい値 (0.028 / 0.022 / 0.024 / 0.026 / 0.72) は dBFS に変換して初期値に反映**しています。入力ゲインを大きくすると従来より検出しやすくなる可能性がありますので、必要に応じて各しきい値を調整してください。
-- 設定は `audioVisualizerSettingsDb:v1:desktop` / `audioVisualizerSettingsDb:v1:mobile` に個別保存します。「解析設定を初期値に戻す」で現在の端末向けの値に戻します。
-- 以前の `audioVisualizerSettings` は値の単位が異なるため、誤用防止のため自動読込しません。
-- +90～+100 dBは非常に大きな増幅率です。ノイズやクリッピング、解析値の飽和に注意してください。解析グラフはスピーカーへ接続されていません。
+1. On page load, the app calls `getUserMedia({ audio: ... })` automatically.
+   Allow microphone access in your browser's permission dialog.
+2. Before permission is granted, the input selector is **not shown**. If the
+   browser blocks automatic prompts, use the **ALLOW MICROPHONE** button. If
+   access was denied, change your browser's site permission and use **TRY AGAIN**.
+3. After permission, the app calls `enumerateDevices()` again while the
+   permission stream is still active. Available input device names appear in
+   the dropdown. Choose one and press **SET**.
+4. To switch inputs later, open **SETTINGS → AUDIO SOURCE**, choose a device,
+   then press **SWITCH SOURCE**.
 
+A device switch uses `deviceId: { exact: ... }`. If the new input cannot be
+opened, the previously connected input keeps running. The selected device is
+synchronized across the startup screen and settings menu after a successful
+switch. Device lists also refresh on the browser's `devicechange` event.
 
-## 入力レベルメーター・アタックランプ
+**Important:** Browsers and operating systems decide which input devices are
+exposed to webpages. Even with permission, the page cannot display devices
+that the browser/OS does not make available. Device labels are obtained from
+the browser; their language may depend on the operating system or drivers.
 
-サイドメニューの入力ゲインの直下に、ゲイン適用後のRMSレベル（dBFS）を表示するメーターを追加しています。表示範囲は-70〜+12 dBFS（上限を超える場合も数値は表示）です。0 dBFSを超える場合は赤表示になります。
+## Controls
 
-Attack、Low/Mid/High Attack、Peakの各しきい値には検出ランプを追加しています。検出時は赤く光り、視認性のため約150ms点灯を維持します。アタック検出判定の計算方法・しきい値は変更していません。
+The top-right buttons open fullscreen and the settings sidebar. Both fade out
+after 3 seconds of inactivity and return when you interact with the page.
+The settings menu controls input gain, full-band/low/mid/high attack detection,
+and peak detection. The input-level meter shows the gain-adjusted RMS level in
+dBFS and threshold lamps light when attacks are detected.
 
+- Desktop default gain: **0 dB**
+- Mobile default gain: **+30 dB**
+- Gain range: **−70 to +100 dB**, step **0.1 dB**
+- Threshold range: **−100 to +100 dB**, step **0.1 dB**
 
-### 入力メーター／アタックランプ修正
+Settings are retained locally using the separate keys
+`audioVisualizerSettingsDb:v1:desktop` and
+`audioVisualizerSettingsDb:v1:mobile`. The **RESET ANALYSIS SETTINGS**
+button restores the corresponding defaults. Audio is analyzed without audible
+speaker playback.
 
-- Web Audio APIの解析系を無音GainNode経由でdestinationに接続し、ブラウザによる解析停止を防止（音は再生しません）。
-- 入力メーターと検出ランプを描画更新より先に処理し、描画エラーでも監視を継続。
-- サイドメニュー内に入力信号の受信状態を表示。
-- メーターはゲイン適用後のRMS、各ランプはしきい値判定を表示。
-- デバイス接続後に設定を開いて確認してください。
+## Audio data
 
+The renderer receives the following values in each `update(audio, dt)` call:
 
-## メーター診断版 v2
+| Property | Meaning |
+| --- | --- |
+| `volume` | Gain-adjusted full-band RMS, clamped to 0–1 |
+| `inputLevel` | Gain-adjusted full-band RMS without the 1.0 cap |
+| `rawVolume` | RMS before input gain |
+| `attack`, `attackTriggered` | Full-band RMS increase and detection flag |
+| `lowAttack`, `lowAttackTriggered` | Low-band (approximately below 250 Hz) |
+| `midAttack`, `midAttackTriggered` | Mid-band (approximately 250–4000 Hz) |
+| `highAttack`, `highAttackTriggered` | High-band (approximately above 4000 Hz) |
+| `peak`, `peakTriggered` | Peak sample amplitude and detection flag |
+| `waveform` | Reused `Float32Array(1024)` of time-domain audio samples |
 
-メーター下に「診断版 v2 | 接続中 | 信号あり ... | 更新 N 回」と表示されます。
-`N` が増えなければ監視UIへの更新経路が実行されていません。旧版キャッシュ、別フォルダを起動している可能性があります。
-`N` が増え「信号なし」の場合は解析器のRMS値が0です。使用している入力デバイスやゲインを確認してください。
-数値とランプの更新は描画処理より先に実行されます。
+Thresholds are expressed as dBFS relative to amplitude 1.0, including the
+positive RMS *difference* used for attack detection. Existing defaults are
+converted from the original amplitude thresholds and were not changed by the
+microphone-selector update.
 
-※ `?v=meter-v2` はブラウザキャッシュの回避用です。
+## Use a different visualizer
 
-## 音声入力切り替えの修正（2026-11-23）
+Create a module exporting `createVisualizer(mount)` that returns the functions
+`update(audio, dt)` and `dispose()`. Use `visualizers/blank.js` for the interface
+and change the import in `main.js` to point to your renderer. The current
+renderer is `visualizers/particle-wave-gravity.js`.
 
-- 設定メニューの「入力デバイス」を変更し、「ソースを切り替える」を押すと、選択したマイクを `deviceId.exact` で要求します。希望優先の `ideal` 指定は使いません。
-- 音声解析グラフ・入力ゲイン・しきい値設定はそのまま維持し、ソースノードのみ付け替えます。新しいソースを接続してから以前の入力を停止します。
-- 切り替えに失敗したときは以前の入力を維持し、設定画面にエラーを表示します。選択欄も現在の入力に戻します。
-- 切り替えに成功すると、初期画面と設定画面の選択内容を実際の入力に同期し、「接続中: デバイス名」と表示します。
-- 音声入力の利用には引き続き HTTPS または localhost とマイクの利用許可が必要です。
+After deploying updated files to GitHub Pages, refresh the browser to load the
+new JavaScript and CSS. The version query parameters in `index.html` and
+imports of `main.js` help avoid stale cached modules.

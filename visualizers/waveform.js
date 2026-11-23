@@ -11,7 +11,7 @@ let attackWaveOpacity = 0;
 export function createVisualizer(mount) {
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Canvas 2D を利用できません。");
+  if (!ctx) throw new Error("Canvas 2D is not available.");
 
   canvas.style.display = "block";
   canvas.style.width = "100%";

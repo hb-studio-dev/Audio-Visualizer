@@ -1,30 +1,43 @@
-import { AudioAnalyser } from "./audio/audioAnalyser.js?v=meter-clean-v3";
-import { AudioSelector } from "./audio/audioSelector.js";
-import { SettingsMenu } from "./ui/settingsMenu.js?v=meter-clean-v3";
-// ★ 新しいページで差し替えるのは、基本的にこの1行だけ
+import { AudioAnalyser } from "./audio/audioAnalyser.js?v=mic-permission-en-v1";
+import { AudioSelector } from "./audio/audioSelector.js?v=mic-permission-en-v1";
+import { SettingsMenu } from "./ui/settingsMenu.js?v=mic-permission-en-v1";
+// Replace this import to load a different visualizer.
 import { createVisualizer } from "./visualizers/particle-wave-gravity.js";
 
 const $ = (id) => document.getElementById(id);
-const initial = $("initialDeviceSelect"),
-  settings = $("settingsDeviceSelect");
+const initial = $("initialDeviceSelect");
+const settings = $("settingsDeviceSelect");
 const selector = new AudioSelector([initial, settings]);
 const analyser = new AudioAnalyser();
 const menu = new SettingsMenu((values) => analyser.setSettings(values));
 const renderer = createVisualizer($("visualizerMount"));
-// ページの描画領域と設定UIをまとめて全画面にする。
+
+const permissionStep = $("permissionStep");
+const permissionStatus = $("permissionStatus");
+const retryPermissionButton = $("retryPermissionButton");
+const deviceSelectionStep = $("deviceSelectionStep");
+
+// Keep the temporary microphone stream open until SET is pressed. Besides
+// preventing a second permission prompt, this helps some browsers retain
+// device labels while the input picker is on screen.
+let permissionStream = null;
+let permissionRequestId = 0;
+let permissionGranted = false;
+let sourceChangeBusy = false;
+
 const fullscreenRoot = $("visualizerRoot");
 const fullscreenButton = $("fullscreenButton");
 function syncFullscreenButton() {
   const active = document.fullscreenElement === fullscreenRoot;
   fullscreenButton.classList.toggle("is-fullscreen", active);
   fullscreenButton.setAttribute("aria-pressed", String(active));
-  const label = active ? "全画面表示を解除する" : "全画面表示にする";
+  const label = active ? "Exit fullscreen" : "Enter fullscreen";
   fullscreenButton.setAttribute("aria-label", label);
   fullscreenButton.title = label;
 }
 if (!document.fullscreenEnabled || !fullscreenRoot.requestFullscreen) {
   fullscreenButton.disabled = true;
-  fullscreenButton.title = "このブラウザでは全画面表示を利用できません";
+  fullscreenButton.title = "Fullscreen is not supported in this browser";
 }
 fullscreenButton.addEventListener("click", async () => {
   try {
@@ -34,34 +47,29 @@ fullscreenButton.addEventListener("click", async () => {
       await fullscreenRoot.requestFullscreen();
     }
   } catch (error) {
-    console.error("全画面表示の切り替えに失敗しました:", error);
-    fullscreenButton.title = `全画面切り替え失敗: ${error.message}`;
+    console.error("Could not toggle fullscreen:", error);
+    fullscreenButton.title = `Fullscreen error: ${error.message}`;
   }
 });
 document.addEventListener("fullscreenchange", syncFullscreenButton);
 syncFullscreenButton();
 
-// 右上の全画面・設定ボタンを、無操作時だけフェードアウトする。
-// 非表示までの時間は、この値（ミリ秒）で変更できます。
+// Fade out the fullscreen and menu buttons after inactivity. User input,
+// rather than the animation loop, resets this timer.
 const CONTROLS_IDLE_MS = 3000;
 const menuHotspot = $("menuHotspot");
 const settingsPanel = $("settingsPanel");
 let controlsHideTimer = 0;
-
 function showControls() {
   window.clearTimeout(controlsHideTimer);
   menuHotspot.classList.remove("is-idle");
   menuHotspot.inert = false;
-
   controlsHideTimer = window.setTimeout(() => {
-    // 設定パネルの表示中は、操作が止まってもボタンを隠さない。
     if (settingsPanel.classList.contains("is-open")) return;
     menuHotspot.classList.add("is-idle");
     menuHotspot.inert = true;
   }, CONTROLS_IDLE_MS);
 }
-
-// PCとスマートフォンの両方に対応。再生中の音や描画ではタイマーを更新しない。
 for (const eventName of ["pointermove", "pointerdown", "wheel", "keydown", "touchstart"]) {
   window.addEventListener(eventName, showControls, { passive: true });
 }
@@ -70,14 +78,12 @@ document.addEventListener("fullscreenchange", showControls);
 window.addEventListener("pageshow", showControls);
 showControls();
 
-let running = false,
-  lastTime = 0,
-  rafId = 0;
+let running = false;
+let lastTime = 0;
+let rafId = 0;
 let visualizerErrorLogged = false;
-
 function render(time) {
   if (!running) return;
-  // 次の更新は最初に予約。描画エラーで監視が止まらないようにする。
   rafId = requestAnimationFrame(render);
   const dt = lastTime ? Math.min((time - lastTime) / 1000, 0.1) : 0;
   lastTime = time;
@@ -85,51 +91,145 @@ function render(time) {
   try {
     analysis = analyser.getAnalysis();
   } catch (error) {
-    console.error("音声解析エラー:", error);
+    console.error("Audio analysis error:", error);
     return;
   }
-  // 解析結果はレンダラーと監視UIに同一オブジェクトを渡す。
-  // フレーム間引きなし。検出イベントの取りこぼしを防ぐ。
   try {
     menu.updateMonitoring(analysis, Boolean(analyser.ctx));
   } catch (error) {
-    console.error("入力メーター更新エラー:", error);
+    console.error("Input meter update error:", error);
   }
   try {
     renderer.update(analysis, dt);
   } catch (error) {
     if (!visualizerErrorLogged) {
-      console.error("ビジュアライザー描画エラー（メーターは継続します）:", error);
+      console.error("Visualizer render error (audio meters continue):", error);
       visualizerErrorLogged = true;
     }
   }
 }
+
 function status(message) {
   $("sourceStatus").textContent = message;
   $("settingsStatus").textContent = message;
 }
-let sourceChangeBusy = false;
+
+function sourceError(error) {
+  if (["OverconstrainedError", "NotFoundError", "DevicesNotFoundError"].includes(error?.name)) {
+    return "The selected microphone was not found. Check that it is connected.";
+  }
+  if (["NotAllowedError", "PermissionDeniedError", "SecurityError"].includes(error?.name)) {
+    return "Microphone access was denied or blocked. Allow access in your browser's site settings, then try again.";
+  }
+  if (["NotReadableError", "TrackStartError"].includes(error?.name)) {
+    return "The microphone could not be opened. Check whether another app is using it.";
+  }
+  if (error?.name === "AbortError") {
+    return "The microphone could not be started. Please try again.";
+  }
+  return error?.message || String(error);
+}
+
+async function requestMicrophonePermission() {
+  if (!navigator.mediaDevices?.getUserMedia || !navigator.mediaDevices?.enumerateDevices) {
+    permissionStatus.textContent = "Microphone access requires HTTPS or localhost and a supported browser.";
+    retryPermissionButton.hidden = true;
+    return;
+  }
+
+  const requestId = ++permissionRequestId;
+  permissionGranted = false;
+  permissionStep.hidden = false;
+  deviceSelectionStep.hidden = true;
+  permissionStatus.textContent = "Please allow microphone access in your browser's permission prompt.";
+  retryPermissionButton.hidden = true;
+
+  // Some browsers require a user gesture or suppress automatic prompts.
+  // Show a manual fallback if no answer arrives; it can make a new request.
+  const fallbackTimer = window.setTimeout(() => {
+    if (requestId === permissionRequestId && !permissionGranted) {
+      retryPermissionButton.hidden = false;
+      retryPermissionButton.textContent = "ALLOW MICROPHONE";
+    }
+  }, 5000);
+
+  let stream;
+  try {
+    // Request permission BEFORE enumerateDevices(), with no deviceId filter.
+    stream = await selector.open();
+    if (requestId !== permissionRequestId) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    permissionStream?.getTracks().forEach((track) => track.stop());
+    permissionStream = stream;
+
+    // Enumerate while a permitted audio track is actively open, so the
+    // browser can reveal the available physical devices and their labels.
+    permissionStatus.textContent = "Loading available audio inputs…";
+    const devices = await selector.refresh();
+    if (requestId !== permissionRequestId) return;
+    if (!devices.length) {
+      throw new Error("No audio input devices are available.");
+    }
+
+    selector.syncToStream(stream);
+    permissionGranted = true;
+    permissionStep.hidden = true;
+    deviceSelectionStep.hidden = false;
+    $("setSourceButton").disabled = false;
+    status("Choose an input device and press SET.");
+  } catch (error) {
+    if (requestId !== permissionRequestId) return;
+    if (permissionStream) {
+      permissionStream.getTracks().forEach((track) => track.stop());
+      permissionStream = null;
+    } else {
+      stream?.getTracks().forEach((track) => track.stop());
+    }
+    permissionStatus.textContent = sourceError(error);
+    retryPermissionButton.textContent = "TRY AGAIN";
+    retryPermissionButton.hidden = false;
+  } finally {
+    window.clearTimeout(fallbackTimer);
+  }
+}
+
+// Switch only after the chosen stream and audio graph are ready. An error
+// leaves the previous source running and the settings unchanged.
 async function selectStream(deviceId) {
   if (sourceChangeBusy) return null;
   sourceChangeBusy = true;
   $("setSourceButton").disabled = true;
   $("applySourceButton").disabled = true;
+
+  let stream;
   try {
-    // 取得に失敗しても従来の入力を残し、ビジュアライザーを停止させない。
-    const stream = await selector.open(deviceId);
+    const preview = permissionStream;
+    const previewId = preview?.getAudioTracks()[0]?.getSettings?.().deviceId;
+    const previewActive = preview?.getAudioTracks().some((track) => track.readyState === "live");
+    const canReusePreview = previewActive && (
+      !deviceId || deviceId === "default" || deviceId === previewId
+    );
+    stream = canReusePreview ? preview : await selector.open(deviceId);
     try {
       await analyser.useStream(stream);
     } catch (error) {
       stream.getTracks().forEach((track) => track.stop());
+      if (permissionStream === stream) permissionStream = null;
       throw error;
     }
+
+    if (permissionStream && permissionStream !== stream) {
+      permissionStream.getTracks().forEach((track) => track.stop());
+    }
+    permissionStream = null;
     menu.resetMonitoring();
-    // 権限取得後はブラウザがデバイス名と固有IDを返せるようになる。
-    // デバイス一覧の更新が失敗しても、接続済みの音声はそのまま使用する。
+
     try {
       await selector.refresh();
     } catch (error) {
-      console.warn("デバイス一覧を更新できませんでした:", error);
+      console.warn("Could not refresh audio inputs:", error);
     }
     const name = selector.syncToStream(stream, deviceId);
     if (!running) {
@@ -139,75 +239,53 @@ async function selectStream(deviceId) {
     return name;
   } finally {
     sourceChangeBusy = false;
-    $("setSourceButton").disabled = false;
+    $("setSourceButton").disabled = !permissionGranted;
     $("applySourceButton").disabled = false;
   }
 }
-async function init() {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    status("HTTPS または localhost で開いてください。");
-    return;
-  }
-  try {
-    // 権限取得後ならデバイス名を列挙できる。初回はSETで権限を要求する。
-    const devices = await selector.refresh();
-    $("setSourceButton").disabled = false;
-    if (!devices.length)
-      status("SETを押してマイクへのアクセスを許可してください。");
-    else status("デバイスを選びSETを押してください。");
-  } catch (error) {
-    status(`デバイス一覧取得失敗: ${error.message}`);
-    $("setSourceButton").disabled = false;
-  }
-}
-function sourceError(error) {
-  if (error.name === "OverconstrainedError" || error.name === "NotFoundError") {
-    return "指定した入力デバイスが見つかりません。接続状態を確認してください。";
-  }
-  if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
-    return "マイクへのアクセスが拒否されました。ブラウザのマイク権限を確認してください。";
-  }
-  if (error.name === "NotReadableError") {
-    return "入力デバイスを使用できません。他のアプリで使用中でないか確認してください。";
-  }
-  return error.message || String(error);
-}
+
+retryPermissionButton.addEventListener("click", requestMicrophonePermission);
 $("setSourceButton").addEventListener("click", async () => {
-  if (sourceChangeBusy) return;
+  if (sourceChangeBusy || !permissionGranted) return;
   const deviceId = initial.value;
-  status("マイクを接続しています…");
+  status("Connecting to microphone…");
   try {
     const name = await selectStream(deviceId);
     $("sourceScreen").classList.add("is-hidden");
-    status(`接続中: ${name}`);
+    status(`Connected: ${name}`);
   } catch (error) {
-    status(`接続できません: ${sourceError(error)}`);
+    status(`Connection failed: ${sourceError(error)}`);
   }
 });
 $("applySourceButton").addEventListener("click", async () => {
-  if (sourceChangeBusy) return;
+  if (sourceChangeBusy || !permissionGranted) return;
   const deviceId = settings.value;
-  status("入力デバイスを切り替えています…");
+  status("Switching audio input…");
   try {
     const name = await selectStream(deviceId);
-    status(`接続中: ${name}`);
+    status(`Connected: ${name}`);
   } catch (error) {
-    // 失敗したデバイス名を選択欄に残さず、現在使用中の入力へ戻す。
     if (analyser.stream) selector.syncToStream(analyser.stream);
-    status(`切り替え失敗: ${sourceError(error)}（以前の入力は継続中）`);
+    status(`Switch failed: ${sourceError(error)} (Previous input remains active.)`);
   }
 });
-navigator.mediaDevices?.addEventListener?.("devicechange", () =>
-  selector.refresh().catch(() => {}),
-);
-window.addEventListener(
-  "pagehide",
-  () => {
-    running = false;
-    cancelAnimationFrame(rafId);
-    renderer.dispose();
-    analyser.stop();
-  },
-  { once: true },
-);
-init();
+
+navigator.mediaDevices?.addEventListener?.("devicechange", () => {
+  if (permissionGranted) selector.refresh().catch((error) => {
+    console.warn("Could not update the input device list:", error);
+  });
+});
+window.addEventListener("pagehide", () => {
+  // An outstanding permission request is invalidated when the page closes.
+  ++permissionRequestId;
+  running = false;
+  cancelAnimationFrame(rafId);
+  permissionStream?.getTracks().forEach((track) => track.stop());
+  permissionStream = null;
+  renderer.dispose();
+  analyser.stop();
+}, { once: true });
+
+// Automatically show the browser's microphone permission prompt on load.
+// Browsers that require a click can use the fallback ALLOW MICROPHONE button.
+requestMicrophonePermission();

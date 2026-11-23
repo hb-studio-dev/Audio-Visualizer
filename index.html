@@ -1,27 +1,36 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#090b12" />
     <title>Audio Visualizer Template</title>
-    <link rel="stylesheet" href="./styles.css?v=audio-switch-fix-v2" />
+    <link rel="stylesheet" href="./styles.css?v=mic-permission-en-v1" />
   </head>
   <body>
-    <main id="visualizerRoot" aria-label="オーディオビジュアライザー">
+    <main id="visualizerRoot" aria-label="Audio visualizer">
       <div id="visualizerMount"></div>
       <div id="sourceScreen" class="source-screen">
         <div class="source-card">
           <h1>AUDIO SOURCE</h1>
-          <p>入力デバイスを選択してください</p>
-          <label for="initialDeviceSelect">INPUT DEVICE</label>
-          <select id="initialDeviceSelect" disabled>
-            <option>入力デバイスを取得しています…</option>
-          </select>
-          <button id="setSourceButton" class="primary" disabled>SET</button>
-          <p id="sourceStatus" class="status" role="status">
-            マイクへのアクセス許可が必要です。
-          </p>
+          <div id="permissionStep" class="source-step">
+            <p class="source-instructions">Please allow microphone access to continue.</p>
+            <p id="permissionStatus" class="status" role="status" aria-live="polite">
+              Waiting for microphone permission…
+            </p>
+            <button id="retryPermissionButton" class="primary" type="button" hidden>
+              ALLOW MICROPHONE
+            </button>
+          </div>
+          <div id="deviceSelectionStep" class="source-step" hidden>
+            <p class="source-instructions">Select an audio input device.</p>
+            <label for="initialDeviceSelect">INPUT DEVICE</label>
+            <select id="initialDeviceSelect" disabled>
+              <option>Loading audio inputs…</option>
+            </select>
+            <button id="setSourceButton" class="primary" type="button" disabled>SET</button>
+            <p id="sourceStatus" class="status" role="status" aria-live="polite"></p>
+          </div>
         </div>
       </div>
       <div id="menuHotspot" class="menu-hotspot">
@@ -29,8 +38,8 @@
           id="fullscreenButton"
           class="fullscreen-button"
           type="button"
-          aria-label="全画面表示にする"
-          title="全画面表示にする"
+          aria-label="Enter fullscreen"
+          title="Enter fullscreen"
           aria-pressed="false"
         >
           <svg
@@ -63,7 +72,7 @@
           class="hamburger"
           aria-expanded="false"
           aria-controls="settingsPanel"
-          aria-label="設定を開く"
+          aria-label="Open settings"
         >
           <span></span><span></span><span></span>
         </button>
@@ -72,7 +81,7 @@
       <aside
         id="settingsPanel"
         class="settings-panel"
-        aria-label="ビジュアライザー設定"
+        aria-label="Visualizer settings"
         aria-hidden="true"
         inert
       >
@@ -80,7 +89,7 @@
           <h2>SETTINGS</h2>
           <button
             id="closeSettingsButton"
-            aria-label="設定を閉じる"
+            aria-label="Close settings"
             class="close-button"
           >
             ×
@@ -88,9 +97,9 @@
         </div>
         <section>
           <h3>AUDIO SOURCE</h3>
-          <label for="settingsDeviceSelect">入力デバイス</label>
+          <label for="settingsDeviceSelect">Input device</label>
           <select id="settingsDeviceSelect"></select>
-          <button id="applySourceButton">ソースを切り替える</button>
+          <button id="applySourceButton">SWITCH SOURCE</button>
           <p id="settingsStatus" class="status" role="status"></p>
         </section>
         <section id="controlsSection">
@@ -98,10 +107,10 @@
           <div id="analysisControls"></div>
         </section>
         <button id="resetSettingsButton" class="reset-button">
-          解析設定を初期値に戻す
+          RESET ANALYSIS SETTINGS
         </button>
       </aside>
     </main>
-    <script type="module" src="./main.js?v=audio-switch-fix-v2"></script>
+    <script type="module" src="./main.js?v=mic-permission-en-v1"></script>
   </body>
 </html>

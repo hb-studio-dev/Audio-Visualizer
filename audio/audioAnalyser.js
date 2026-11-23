@@ -78,10 +78,10 @@ export class AudioAnalyser {
 
   async useStream(stream) {
     if (!stream?.getAudioTracks().length) {
-      throw new Error("音声トラックを取得できませんでした。");
+      throw new Error("No audio track was available.");
     }
     const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) throw new Error("Web Audio APIに対応していません。");
+    if (!Ctx) throw new Error("Web Audio API is not supported in this browser.");
 
     // 切り替えるたびにAudioContextを破棄すると、音の途切れや
     // ブラウザによるオーディオ初期化失敗が起こりやすいので、解析グラフは維持する。

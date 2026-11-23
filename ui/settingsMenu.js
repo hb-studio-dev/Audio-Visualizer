@@ -1,53 +1,53 @@
-import { DEVICE_DEFAULT_SETTINGS } from "../audio/audioAnalyser.js";
+import { DEVICE_DEFAULT_SETTINGS } from "../audio/audioAnalyser.js?v=mic-permission-en-v1";
 
 const CONTROL_DEFS = [
   {
     key: "inputGainDb",
-    label: "入力ゲイン",
+    label: "Input Gain",
     min: -70,
     max: 100,
     step: 0.1,
-    description: "音声解析用の入力ゲイン（dB）。音声はスピーカーへ出力しません。",
+    description: "Input gain for audio analysis (dB). Audio is not played through the speakers.",
   },
   {
     key: "attackThresholdDb",
-    label: "全帯域 Attack しきい値",
+    label: "Full-Band Attack Threshold",
     min: -100,
     max: 100,
     step: 0.1,
-    description: "前フレームからの全帯域RMS増加量（dBFS）",
+    description: "Increase in full-band RMS since the previous frame (dBFS).",
   },
   {
     key: "lowAttackThresholdDb",
-    label: "Low Attack しきい値",
+    label: "Low Attack Threshold",
     min: -100,
     max: 100,
     step: 0.1,
-    description: "低域（概ね250Hz以下）のRMS増加量（dBFS）",
+    description: "Increase in low-band RMS (approximately below 250 Hz), in dBFS.",
   },
   {
     key: "midAttackThresholdDb",
-    label: "Mid Attack しきい値",
+    label: "Mid Attack Threshold",
     min: -100,
     max: 100,
     step: 0.1,
-    description: "中域（概ね250–4000Hz）のRMS増加量（dBFS）",
+    description: "Increase in mid-band RMS (approximately 250–4000 Hz), in dBFS.",
   },
   {
     key: "highAttackThresholdDb",
-    label: "High Attack しきい値",
+    label: "High Attack Threshold",
     min: -100,
     max: 100,
     step: 0.1,
-    description: "高域（概ね4000Hz以上）のRMS増加量（dBFS）",
+    description: "Increase in high-band RMS (approximately above 4000 Hz), in dBFS.",
   },
   {
     key: "peakThresholdDb",
-    label: "Peak しきい値",
+    label: "Peak Threshold",
     min: -100,
     max: 100,
     step: 0.1,
-    description: "瞬間最大振幅（dBFS）",
+    description: "Instantaneous peak amplitude (dBFS).",
   },
 ];
 
@@ -94,8 +94,8 @@ export class SettingsMenu {
     const deviceInfo = document.createElement("p");
     deviceInfo.className = "device-profile-note";
     deviceInfo.textContent =
-      `現在の初期設定：${this.deviceProfile === "mobile" ? "スマートフォン" : "PC"} ` +
-      `（入力ゲイン ${labelDb(this.defaults.inputGainDb)}）`;
+      `Default profile: ${this.deviceProfile === "mobile" ? "Mobile" : "Desktop"} ` +
+      `(input gain ${labelDb(this.defaults.inputGainDb)})`;
     controls.append(deviceInfo);
 
     for (const def of CONTROL_DEFS) {
@@ -112,8 +112,8 @@ export class SettingsMenu {
         const lamp = document.createElement("span");
         lamp.className = "detection-lamp";
         lamp.setAttribute("role", "status");
-        lamp.setAttribute("aria-label", `${def.label}: 未検出`);
-        lamp.title = "検出時に点灯";
+        lamp.setAttribute("aria-label", `${def.label}: Not detected`);
+        lamp.title = "Lights up when an attack is detected";
         title.append(" ", lamp);
         this.indicators.set(def.key, lamp);
       }
@@ -134,7 +134,7 @@ export class SettingsMenu {
       number.max = String(def.max);
       number.step = String(def.step);
       number.id = `setting-number-${def.key}`;
-      number.setAttribute("aria-label", `${def.label}（dB）`);
+      number.setAttribute("aria-label", `${def.label} (dB)`);
       const unit = document.createElement("span");
       unit.textContent = "dB";
       numberRow.append(number, unit);
@@ -149,15 +149,15 @@ export class SettingsMenu {
         meter.className = "input-level-meter";
         meter.innerHTML = `
           <div class="meter-heading">
-            <span>入力レベル（ゲイン適用後）</span>
-            <output class="meter-reading" aria-label="現在の入力レベル">−∞ dBFS</output>
+            <span>Input Level (After Gain)</span>
+            <output class="meter-reading" aria-label="Current input level">−∞ dBFS</output>
           </div>
-          <div class="meter-track" role="meter" aria-label="入力レベル" aria-valuemin="-70" aria-valuemax="12" aria-valuenow="-70" aria-valuetext="無音">
+          <div class="meter-track" role="meter" aria-label="Input level" aria-valuemin="-70" aria-valuemax="12" aria-valuenow="-70" aria-valuetext="Silence">
             <div class="meter-fill"></div>
             <div class="meter-zero"></div>
           </div>
           <div class="meter-ticks"><span>−70</span><span>−40</span><span>−20</span><span>0</span><span>+12 dBFS</span></div>
-          <small>ゲインを調整し、通常時は0 dBFS以下を目安にしてください。</small>
+          <small>Adjust the gain to keep normal input levels below 0 dBFS.</small>
         `;
         row.append(meter);
         this.meterLevel = meter.querySelector(".meter-track");
@@ -289,7 +289,7 @@ export class SettingsMenu {
       if (!lamp) continue;
       lamp.classList.toggle("is-lit", lit);
       const label = CONTROL_DEFS.find((def) => def.key === key).label;
-      lamp.setAttribute("aria-label", `${label}: ${lit ? "検出" : "未検出"}`);
+      lamp.setAttribute("aria-label", `${label}: ${lit ? "Detected" : "Not detected"}`);
     }
 
   }
@@ -302,7 +302,7 @@ export class SettingsMenu {
       this.meterValue.textContent = "−∞ dBFS";
       this.meterValue.classList.remove("is-over");
       this.meterLevel.setAttribute("aria-valuenow", "-70");
-      this.meterLevel.setAttribute("aria-valuetext", "無音");
+      this.meterLevel.setAttribute("aria-valuetext", "Silence");
     }
     for (const lamp of this.indicators.values()) lamp.classList.remove("is-lit");
   }
