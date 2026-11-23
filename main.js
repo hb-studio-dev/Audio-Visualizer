@@ -108,19 +108,39 @@ function status(message) {
   $("sourceStatus").textContent = message;
   $("settingsStatus").textContent = message;
 }
+let sourceChangeBusy = false;
 async function selectStream(deviceId) {
-  menu.resetMonitoring();
-  const stream = await selector.open(deviceId);
+  if (sourceChangeBusy) return null;
+  sourceChangeBusy = true;
+  $("setSourceButton").disabled = true;
+  $("applySourceButton").disabled = true;
   try {
-    await analyser.useStream(stream);
-  } catch (e) {
-    stream.getTracks().forEach((t) => t.stop());
-    throw e;
-  }
-  await selector.refresh();
-  if (!running) {
-    running = true;
-    rafId = requestAnimationFrame(render);
+    // 取得に失敗しても従来の入力を残し、ビジュアライザーを停止させない。
+    const stream = await selector.open(deviceId);
+    try {
+      await analyser.useStream(stream);
+    } catch (error) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw error;
+    }
+    menu.resetMonitoring();
+    // 権限取得後はブラウザがデバイス名と固有IDを返せるようになる。
+    // デバイス一覧の更新が失敗しても、接続済みの音声はそのまま使用する。
+    try {
+      await selector.refresh();
+    } catch (error) {
+      console.warn("デバイス一覧を更新できませんでした:", error);
+    }
+    const name = selector.syncToStream(stream, deviceId);
+    if (!running) {
+      running = true;
+      rafId = requestAnimationFrame(render);
+    }
+    return name;
+  } finally {
+    sourceChangeBusy = false;
+    $("setSourceButton").disabled = false;
+    $("applySourceButton").disabled = false;
   }
 }
 async function init() {
@@ -129,40 +149,52 @@ async function init() {
     return;
   }
   try {
-    // 権限取得後ならデバイス名を列挙できる。権限が未付与の場合はボタン押下で許可を要求する。
+    // 権限取得後ならデバイス名を列挙できる。初回はSETで権限を要求する。
     const devices = await selector.refresh();
     $("setSourceButton").disabled = false;
     if (!devices.length)
       status("SETを押してマイクへのアクセスを許可してください。");
     else status("デバイスを選びSETを押してください。");
-  } catch (e) {
-    status(`デバイス一覧取得失敗: ${e.message}`);
+  } catch (error) {
+    status(`デバイス一覧取得失敗: ${error.message}`);
     $("setSourceButton").disabled = false;
   }
 }
+function sourceError(error) {
+  if (error.name === "OverconstrainedError" || error.name === "NotFoundError") {
+    return "指定した入力デバイスが見つかりません。接続状態を確認してください。";
+  }
+  if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
+    return "マイクへのアクセスが拒否されました。ブラウザのマイク権限を確認してください。";
+  }
+  if (error.name === "NotReadableError") {
+    return "入力デバイスを使用できません。他のアプリで使用中でないか確認してください。";
+  }
+  return error.message || String(error);
+}
 $("setSourceButton").addEventListener("click", async () => {
-  $("setSourceButton").disabled = true;
+  if (sourceChangeBusy) return;
+  const deviceId = initial.value;
   status("マイクを接続しています…");
   try {
-    await selectStream(initial.value);
+    const name = await selectStream(deviceId);
     $("sourceScreen").classList.add("is-hidden");
-    status("接続中");
-  } catch (e) {
-    status(`接続できません: ${e.message}`);
-  } finally {
-    $("setSourceButton").disabled = false;
+    status(`接続中: ${name}`);
+  } catch (error) {
+    status(`接続できません: ${sourceError(error)}`);
   }
 });
 $("applySourceButton").addEventListener("click", async () => {
-  $("applySourceButton").disabled = true;
+  if (sourceChangeBusy) return;
+  const deviceId = settings.value;
   status("入力デバイスを切り替えています…");
   try {
-    await selectStream(settings.value);
-    status("入力デバイスを切り替えました。");
-  } catch (e) {
-    status(`切り替え失敗: ${e.message}`);
-  } finally {
-    $("applySourceButton").disabled = false;
+    const name = await selectStream(deviceId);
+    status(`接続中: ${name}`);
+  } catch (error) {
+    // 失敗したデバイス名を選択欄に残さず、現在使用中の入力へ戻す。
+    if (analyser.stream) selector.syncToStream(analyser.stream);
+    status(`切り替え失敗: ${sourceError(error)}（以前の入力は継続中）`);
   }
 });
 navigator.mediaDevices?.addEventListener?.("devicechange", () =>

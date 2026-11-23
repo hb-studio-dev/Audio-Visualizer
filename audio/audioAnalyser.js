@@ -30,6 +30,7 @@ export class AudioAnalyser {
   constructor(settings = {}) {
     this.ctx = null;
     this.stream = null;
+    this.sourceNode = null;
     this.gainNode = null;
     this.silentSink = null;
     this.nodes = [];
@@ -76,53 +77,81 @@ export class AudioAnalyser {
   }
 
   async useStream(stream) {
-    await this.stop();
+    if (!stream?.getAudioTracks().length) {
+      throw new Error("音声トラックを取得できませんでした。");
+    }
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) throw new Error("Web Audio APIに対応していません。");
-    const ctx = new Ctx();
-    this.ctx = ctx;
-    this.stream = stream;
-    const source = ctx.createMediaStreamSource(stream);
-    const gain = ctx.createGain();
-    gain.gain.value = this.inputGain;
-    this.gainNode = gain;
-    source.connect(gain);
 
-    const createBand = (type, frequency) => {
-      const filter = ctx.createBiquadFilter();
-      filter.type = type;
-      filter.frequency.value = frequency;
-      filter.Q.value = 0.707;
-      gain.connect(filter);
-      return filter;
-    };
-    const low = createBand("lowpass", 250);
-    const midLow = createBand("highpass", 250);
-    const midHigh = ctx.createBiquadFilter();
-    midHigh.type = "lowpass";
-    midHigh.frequency.value = 4000;
-    midLow.connect(midHigh);
-    const high = createBand("highpass", 4000);
-    const sources = [gain, low, midHigh, high];
-    this.nodes = sources.map((node) => {
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0;
-      node.connect(analyser);
-      return analyser;
-    });
-    // Web Audio のグラフを常時処理させるため、無音の終端へ接続する。
-    // 出力ゲインは0なのでスピーカーから音は出ない。
-    const silentSink = ctx.createGain();
-    silentSink.gain.value = 0;
-    this.nodes.forEach((node) => node.connect(silentSink));
-    silentSink.connect(ctx.destination);
-    this.silentSink = silentSink;
-    this.sampleBuffers = this.nodes.map(() => new Float32Array(1024));
-    this.waveform = this.sampleBuffers[0];
+    // 切り替えるたびにAudioContextを破棄すると、音の途切れや
+    // ブラウザによるオーディオ初期化失敗が起こりやすいので、解析グラフは維持する。
+    const isNewContext = !this.ctx;
+    const ctx = this.ctx || new Ctx();
+    let graph = null;
+    let newSource = null;
+    try {
+      if (isNewContext) {
+        const gain = ctx.createGain();
+        gain.gain.value = this.inputGain;
+        const createBand = (type, frequency) => {
+          const filter = ctx.createBiquadFilter();
+          filter.type = type;
+          filter.frequency.value = frequency;
+          filter.Q.value = 0.707;
+          gain.connect(filter);
+          return filter;
+        };
+        const low = createBand("lowpass", 250);
+        const midLow = createBand("highpass", 250);
+        const midHigh = ctx.createBiquadFilter();
+        midHigh.type = "lowpass";
+        midHigh.frequency.value = 4000;
+        midLow.connect(midHigh);
+        const high = createBand("highpass", 4000);
+        const nodes = [gain, low, midHigh, high].map((node) => {
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 1024;
+          analyser.smoothingTimeConstant = 0;
+          node.connect(analyser);
+          return analyser;
+        });
+        // 音声の解析を継続するための無音出力。実際の音は再生しない。
+        const silentSink = ctx.createGain();
+        silentSink.gain.value = 0;
+        nodes.forEach((node) => node.connect(silentSink));
+        silentSink.connect(ctx.destination);
+        graph = { gain, nodes, silentSink };
+      }
+
+      newSource = ctx.createMediaStreamSource(stream);
+      if (ctx.state !== "running") await ctx.resume();
+      newSource.connect(graph?.gain || this.gainNode);
+    } catch (error) {
+      newSource?.disconnect();
+      if (isNewContext) await ctx.close().catch(() => {});
+      throw error;
+    }
+
+    // 新しい入力の接続が完了してから、古い入力を切断する。
+    // 接続失敗時は古い入力がそのまま動作する。
+    const oldSource = this.sourceNode;
+    const oldStream = this.stream;
+    if (graph) {
+      this.ctx = ctx;
+      this.gainNode = graph.gain;
+      this.nodes = graph.nodes;
+      this.silentSink = graph.silentSink;
+      this.sampleBuffers = this.nodes.map(() => new Float32Array(1024));
+      this.waveform = this.sampleBuffers[0];
+    }
+    this.sourceNode = newSource;
+    this.stream = stream;
+    oldSource?.disconnect();
+    if (oldStream && oldStream !== stream) {
+      oldStream.getTracks().forEach((track) => track.stop());
+    }
     this.previous = { full: 0, low: 0, mid: 0, high: 0 };
     this.analysis = this.emptyAnalysis();
-    await ctx.resume();
   }
 
   getAnalysis() {
@@ -163,8 +192,10 @@ export class AudioAnalyser {
   }
 
   async stop() {
-    if (this.stream) this.stream.getTracks().forEach((track) => track.stop());
-    if (this.ctx) await this.ctx.close().catch(() => {});
+    const stream = this.stream;
+    const ctx = this.ctx;
+    this.sourceNode?.disconnect();
+    this.sourceNode = null;
     this.ctx = null;
     this.stream = null;
     this.nodes = [];
@@ -174,5 +205,7 @@ export class AudioAnalyser {
     this.silentSink = null;
     this.previous = { full: 0, low: 0, mid: 0, high: 0 };
     this.analysis = this.emptyAnalysis();
+    stream?.getTracks().forEach((track) => track.stop());
+    if (ctx) await ctx.close().catch(() => {});
   }
 }
