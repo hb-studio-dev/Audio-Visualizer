@@ -40,6 +40,36 @@ fullscreenButton.addEventListener("click", async () => {
 });
 document.addEventListener("fullscreenchange", syncFullscreenButton);
 syncFullscreenButton();
+
+// 右上の全画面・設定ボタンを、無操作時だけフェードアウトする。
+// 非表示までの時間は、この値（ミリ秒）で変更できます。
+const CONTROLS_IDLE_MS = 3000;
+const menuHotspot = $("menuHotspot");
+const settingsPanel = $("settingsPanel");
+let controlsHideTimer = 0;
+
+function showControls() {
+  window.clearTimeout(controlsHideTimer);
+  menuHotspot.classList.remove("is-idle");
+  menuHotspot.inert = false;
+
+  controlsHideTimer = window.setTimeout(() => {
+    // 設定パネルの表示中は、操作が止まってもボタンを隠さない。
+    if (settingsPanel.classList.contains("is-open")) return;
+    menuHotspot.classList.add("is-idle");
+    menuHotspot.inert = true;
+  }, CONTROLS_IDLE_MS);
+}
+
+// PCとスマートフォンの両方に対応。再生中の音や描画ではタイマーを更新しない。
+for (const eventName of ["pointermove", "pointerdown", "wheel", "keydown", "touchstart"]) {
+  window.addEventListener(eventName, showControls, { passive: true });
+}
+menuHotspot.addEventListener("focusin", showControls);
+document.addEventListener("fullscreenchange", showControls);
+window.addEventListener("pageshow", showControls);
+showControls();
+
 let running = false,
   lastTime = 0,
   rafId = 0;
