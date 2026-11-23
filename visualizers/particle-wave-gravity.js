@@ -5,17 +5,15 @@
  * WebGL2 / Transform Feedback
  *
  * - 最大1000万パーティクル
- * - 通常粒子：赤から白へ変化
+ * - 通常粒子：赤から生成時のLFO指定色へ変化
+ * - 到達色：赤 → 白 → シアン → 白 → 赤
  * - アタック粒子：赤のまま
- * - GPU上で粒子の位置と速度を保持
+ * - GPU上で位置・速度を保持
  * - アタックごとに重力点を生成
- * - 重力点に固定最大数を設定しない
- * - 引力が十分小さくなると重力点が消滅
- * - 距離と時間による曲線的な引力減衰
- * - 重力点の移動速度：%/秒
- * - 重力の強さ：%/秒²
- * - 重力の影響半径：%
- * - アタック音量による重力の強さの変化
+ * - 重力点に固定最大数を設けない
+ * - 重力の強さはアタック音量と連動
+ * - 重力パラメータは画面サイズ基準
+ * - 各粒子の到達色は生成時に固定
  */
 
 export function createVisualizer(mount) {
@@ -68,7 +66,65 @@ export function createVisualizer(mount) {
   // 色変化の半減期
   // ========================================
 
+  // 赤から到達色へ近づく速さ
+  // 単位：秒
+  //
+  // 2.0の場合：
+  // 2秒後にゴールまで50%
+  // 4秒後にゴールまで75%
+  // 6秒後にゴールまで87.5%
+
   const NORMAL_COLOR_HALF_LIFE = 2.0;
+
+  // ========================================
+  // 到達色を決めるLFO
+  // ========================================
+
+  // LFOの有効・無効
+  const COLOR_LFO_ENABLED = true;
+
+  // ----------------------------------------
+  // LFOの最小周波数
+  // ----------------------------------------
+
+  // 単位：Hz
+  //
+  // 0.01Hz = 1周期100秒
+
+  const COLOR_LFO_FREQ_MIN = 0.001;
+
+  // ----------------------------------------
+  // LFOの最大周波数
+  // ----------------------------------------
+
+  // 単位：Hz
+  //
+  // 0.05Hz = 1周期20秒
+
+  const COLOR_LFO_FREQ_MAX = 0.01;
+
+  // ----------------------------------------
+  // LFO周波数が変化する速さ
+  // ----------------------------------------
+
+  // 単位：Hz
+  //
+  // LFO自体の周波数が
+  // MIN～MAXの間を往復する速さ
+
+  const COLOR_LFO_FREQ_DRIFT = 0.001;
+
+  // ----------------------------------------
+  // LFOの初期位相
+  // ----------------------------------------
+
+  // 単位：ラジアン
+  //
+  // 0              = 白からスタート
+  // -Math.PI / 2   = 赤からスタート
+  // Math.PI / 2    = シアンからスタート
+
+  const COLOR_LFO_PHASE_OFFSET = 0;
 
   // ========================================
   // パーティクル初期移動速度
@@ -91,8 +147,8 @@ export function createVisualizer(mount) {
   const GRAVITY_SPEED_MIN = 0;
   const GRAVITY_SPEED_MAX = 5;
 
-  // X軸：画面幅に対する%
-  // Y軸：画面高さに対する%
+  // X方向は画面幅基準
+  // Y方向は画面高さ基準
 
   // ----------------------------------------
   // 重力点が静止する確率
@@ -122,20 +178,7 @@ export function createVisualizer(mount) {
   const GRAVITY_VOLUME_INFLUENCE = 0.8;
 
   // このRMS音量を100%として扱う
-  // これ以上の音量は100%に制限
-
   const GRAVITY_VOLUME_REFERENCE = 0.25;
-
-  // 音量倍率：
-  //
-  // influence = 0.0
-  //   常に1倍
-  //
-  // influence = 0.5
-  //   0.5～1.5倍
-  //
-  // influence = 1.0
-  //   0～2倍
 
   // ----------------------------------------
   // 重力の影響半径
@@ -150,18 +193,11 @@ export function createVisualizer(mount) {
   // ----------------------------------------
 
   const GRAVITY_DECAY_RATE = 0.1;
-
-  // 1.0 = 通常の指数減衰
-  // 1.0より大きい = 初期は緩やか
-  // 1.0より小さい = 初期に急速に減衰
-
   const GRAVITY_DECAY_CURVE = 1.8;
 
   // ----------------------------------------
   // 重力点の消滅判定
   // ----------------------------------------
-
-  // 単位：画面高さに対する%/秒²
 
   const GRAVITY_ZERO_THRESHOLD = 0.001;
 
@@ -207,6 +243,10 @@ export function createVisualizer(mount) {
     ATTACK_SPEED_HALF_LIFE <= 0 ||
 
     NORMAL_COLOR_HALF_LIFE <= 0 ||
+
+    COLOR_LFO_FREQ_MIN < 0 ||
+    COLOR_LFO_FREQ_MAX < COLOR_LFO_FREQ_MIN ||
+    COLOR_LFO_FREQ_DRIFT < 0 ||
 
     GRAVITY_DECAY_RATE <= 0 ||
     GRAVITY_DECAY_CURVE <= 0 ||
@@ -325,13 +365,13 @@ export function createVisualizer(mount) {
     precision highp sampler2D;
 
     layout(location = 0) in vec4 aState;
-    layout(location = 1) in vec2 aMeta;
+    layout(location = 1) in vec3 aMeta;
 
     // aState:
     // x, y, vx, vy
-
+    //
     // aMeta:
-    // birthTime, attackFlag
+    // birthTime, attackFlag, targetColor
 
     uniform sampler2D uGravityTexture;
     uniform int uGravityCount;
@@ -431,10 +471,6 @@ export function createVisualizer(mount) {
         // 距離による減衰
         // ------------------------------------
 
-        // 中心付近 = 強い
-        // 外周付近 = 弱い
-        // 半径外 = 0
-
         float t = clamp(
           1.0 - distanceToCenter / radius,
           0.0,
@@ -442,7 +478,6 @@ export function createVisualizer(mount) {
         );
 
         // Smoothstep型の減衰
-
         float falloff =
           t * t * (3.0 - 2.0 * t);
 
@@ -501,7 +536,16 @@ export function createVisualizer(mount) {
     precision highp float;
 
     layout(location = 0) in vec4 aState;
-    layout(location = 1) in vec2 aMeta;
+
+    // ========================================
+    // メタデータ
+    // ========================================
+
+    // x = birthTime
+    // y = attackFlag
+    // z = targetColor
+
+    layout(location = 1) in vec3 aMeta;
 
     uniform float uTime;
     uniform float uWidth;
@@ -559,6 +603,16 @@ export function createVisualizer(mount) {
       );
 
       float attack = aMeta.y;
+
+      // ======================================
+      // 生成時に保存した到達色
+      // ======================================
+
+      float targetColor = clamp(
+        aMeta.z,
+        0.0,
+        1.0
+      );
 
       float decay = mix(
         uDecay.x,
@@ -654,17 +708,36 @@ export function createVisualizer(mount) {
       );
 
       // ======================================
-      // 色変化
+      // 色変化の進行率
       // ======================================
 
-      float whiteness =
+      // 生成後、時間経過とともに
+      // 0から1へ近づく
+      //
+      // この値そのものは時間で変化する
+
+      float colorProgress =
         1.0 - exp(
           -LN2 * age /
           max(uColorHalfLife, 0.0001)
         );
 
+      // ======================================
+      // 赤から到達色へ変化
+      // ======================================
+
+      // targetColorは生成時に固定された値
+      //
+      // targetColor = 0.0 → 赤
+      // targetColor = 0.5 → 白
+      // targetColor = 1.0 → シアン
+      //
+      // アタック粒子は赤のまま
+
       vWhiteness =
-        whiteness * (1.0 - attack);
+        colorProgress *
+        targetColor *
+        (1.0 - attack);
     }
   `;
 
@@ -698,11 +771,62 @@ export function createVisualizer(mount) {
         discard;
       }
 
-      vec3 color = mix(
-        vec3(1.0, 0.0, 0.0),
-        vec3(1.0, 1.0, 1.0),
-        vWhiteness
+      // ======================================
+      // パーティクルの色
+      // 赤 → 白 → シアン
+      // ======================================
+
+      // 初期色：赤
+      vec3 initialColor = vec3(
+        1.0,
+        0.0,
+        0.0
       );
+
+      // 中間色：白
+      vec3 middleColor = vec3(
+        1.0,
+        1.0,
+        1.0
+      );
+
+      // 最終色：シアン
+      vec3 finalColor = vec3(
+        0.0,
+        1.0,
+        1.0
+      );
+
+      vec3 color;
+
+      // ======================================
+      // 赤 → 白
+      // ======================================
+
+      if (vWhiteness < 0.5) {
+
+        color = mix(
+          initialColor,
+          middleColor,
+          vWhiteness * 2.0
+        );
+
+      // ======================================
+      // 白 → シアン
+      // ======================================
+
+      } else {
+
+        color = mix(
+          middleColor,
+          finalColor,
+          (vWhiteness - 0.5) * 2.0
+        );
+      }
+
+      // ======================================
+      // アルファ値
+      // ======================================
 
       float coverage = min(
         1.0,
@@ -948,7 +1072,19 @@ export function createVisualizer(mount) {
   // ========================================
 
   const STATE_BYTES = 16;
-  const META_BYTES = 8;
+
+  // ========================================
+  // メタデータ
+  // ========================================
+
+  // birthTime  = float
+  // attackFlag = float
+  // targetColor = float
+  //
+  // 1粒子につきfloat 3個
+  // 3 * 4バイト = 12バイト
+
+  const META_BYTES = 12;
 
   // x, y, vx, vy
   const states = [
@@ -956,7 +1092,7 @@ export function createVisualizer(mount) {
     gl.createBuffer()
   ];
 
-  // birthTime, attackFlag
+  // birthTime, attackFlag, targetColor
   const metaBuffer = gl.createBuffer();
 
   // ========================================
@@ -998,6 +1134,10 @@ export function createVisualizer(mount) {
 
     gl.bindVertexArray(vao);
 
+    // ----------------------------------------
+    // 粒子の位置と速度
+    // ----------------------------------------
+
     gl.bindBuffer(
       gl.ARRAY_BUFFER,
       buffer
@@ -1014,6 +1154,10 @@ export function createVisualizer(mount) {
       0
     );
 
+    // ----------------------------------------
+    // メタデータ
+    // ----------------------------------------
+
     gl.bindBuffer(
       gl.ARRAY_BUFFER,
       metaBuffer
@@ -1023,7 +1167,7 @@ export function createVisualizer(mount) {
 
     gl.vertexAttribPointer(
       1,
-      2,
+      3,
       gl.FLOAT,
       false,
       META_BYTES,
@@ -1118,7 +1262,6 @@ export function createVisualizer(mount) {
   // 重力点管理
   // ========================================
 
-  // 固定の最大数は設定しない
   const gravityPoints = [];
 
   let previousAttack = false;
@@ -1138,7 +1281,86 @@ export function createVisualizer(mount) {
   let previousTime = getTime();
 
   // ========================================
-  // 画面サイズ
+  // LFOの状態
+  // ========================================
+
+  // LFOの位相
+  let colorLfoPhase =
+    COLOR_LFO_PHASE_OFFSET;
+
+  // 現在の色の位置
+  //
+  // 0.0 = 赤
+  // 0.5 = 白
+  // 1.0 = シアン
+
+  let colorLfoValue =
+    (Math.sin(colorLfoPhase) + 1) * 0.5;
+
+  // ========================================
+  // LFO更新
+  // ========================================
+
+  function updateColorLfo(now, dt) {
+
+    if (!COLOR_LFO_ENABLED) {
+
+      // 無効時はシアンがゴール
+      colorLfoValue = 1.0;
+
+      return;
+    }
+
+    // ======================================
+    // 周波数の変動
+    // ======================================
+
+    // MIN～MAXの間をゆっくり往復
+    const modulation =
+      (
+        Math.sin(
+          2 * Math.PI *
+          COLOR_LFO_FREQ_DRIFT *
+          now
+        ) + 1
+      ) * 0.5;
+
+    const frequency =
+      COLOR_LFO_FREQ_MIN +
+      (
+        COLOR_LFO_FREQ_MAX -
+        COLOR_LFO_FREQ_MIN
+      ) * modulation;
+
+    // ======================================
+    // LFO位相の更新
+    // ======================================
+
+    colorLfoPhase +=
+      2 * Math.PI * frequency * dt;
+
+    // 0～2πに収める
+    colorLfoPhase %=
+      2 * Math.PI;
+
+    // ======================================
+    // 現在の到達色
+    // ======================================
+
+    // sin波を0～1に変換
+    //
+    // 0.0 = 赤
+    // 0.5 = 白
+    // 1.0 = シアン
+
+    colorLfoValue =
+      (
+        Math.sin(colorLfoPhase) + 1
+      ) * 0.5;
+  }
+
+  // ========================================
+  // 描画サイズ
   // ========================================
 
   let width = 1;
@@ -1151,12 +1373,12 @@ export function createVisualizer(mount) {
 
   function calculateGravityVolumeFactor(waveform) {
 
-    // 音量の影響が無効なら計算しない
+    // 音量の影響が無効
     if (GRAVITY_VOLUME_INFLUENCE === 0) {
       return 1;
     }
 
-    // 波形が取得できなければ従来の強さ
+    // 波形がなければ従来の強さ
     if (
       !waveform ||
       waveform.length === 0
@@ -1176,8 +1398,7 @@ export function createVisualizer(mount) {
       i++
     ) {
 
-      const sample =
-        waveform[i];
+      const sample = waveform[i];
 
       sum += sample * sample;
     }
@@ -1199,16 +1420,8 @@ export function createVisualizer(mount) {
     );
 
     // ======================================
-    // 音量倍率
+    // 重力倍率
     // ======================================
-
-    // influence = 0
-    //   1倍固定
-    //
-    // influence = 1
-    //   音量0%   → 0倍
-    //   音量50%  → 1倍
-    //   音量100% → 2倍
 
     const volumeFactor =
       1 +
@@ -1247,7 +1460,7 @@ export function createVisualizer(mount) {
       point.strength * envelope;
 
     // ======================================
-    // 十分小さくなったら0
+    // 十分小さくなったら消滅
     // ======================================
 
     return strength <= GRAVITY_ZERO_THRESHOLD
@@ -1266,7 +1479,7 @@ export function createVisualizer(mount) {
     }
 
     // ======================================
-    // 静止判定
+    // 静止するかどうか
     // ======================================
 
     const stationary =
@@ -1274,15 +1487,11 @@ export function createVisualizer(mount) {
       GRAVITY_STATIONARY_PROBABILITY;
 
     // ======================================
-    // 移動軸
+    // 移動方向
     // ======================================
 
     const axisX =
       Math.random() < 0.5;
-
-    // ======================================
-    // 移動方向
-    // ======================================
 
     const direction =
       Math.random() < 0.5 ? -1 : 1;
@@ -1299,14 +1508,14 @@ export function createVisualizer(mount) {
         );
 
     // ======================================
-    // アタック音量から重力倍率を取得
+    // アタック音量による重力倍率
     // ======================================
 
     const volumeFactor =
       calculateGravityVolumeFactor(waveform);
 
     // ======================================
-    // 基本となるランダムな引力
+    // ランダムな基本引力
     // ======================================
 
     const baseStrength = randomBetween(
@@ -1315,14 +1524,14 @@ export function createVisualizer(mount) {
     );
 
     // ======================================
-    // 音量による倍率を適用
+    // 最終的な引力
     // ======================================
 
     const finalStrength =
       baseStrength * volumeFactor;
 
     // ======================================
-    // 表示マーカー
+    // 重力点の表示マーカー
     // ======================================
 
     let marker = null;
@@ -1345,57 +1554,35 @@ export function createVisualizer(mount) {
     }
 
     // ======================================
-    // 重力点データ生成
+    // 重力点データ
     // ======================================
 
     gravityPoints.push({
 
-      // --------------------------------------
-      // 初期位置
-      // 画面サイズに対する割合
-      // --------------------------------------
-
+      // 画面サイズに対する初期位置
       x: Math.random(),
       y: Math.random(),
 
-      // --------------------------------------
       // 影響半径（%）
-      // --------------------------------------
-
       radius: randomBetween(
         GRAVITY_RADIUS_MIN,
         GRAVITY_RADIUS_MAX
       ),
 
-      // --------------------------------------
-      // 引力（%/秒²）
-      // 音量倍率適用済み
-      // --------------------------------------
-
+      // 音量連動済みの引力
       strength: finalStrength,
 
-      // --------------------------------------
-      // X軸移動速度
-      // 画面幅に対する割合/秒
-      // --------------------------------------
-
+      // X方向の速度
       vx: axisX
         ? (speed / 100) * direction
         : 0,
 
-      // --------------------------------------
-      // Y軸移動速度
-      // 画面高さに対する割合/秒
-      // --------------------------------------
-
+      // Y方向の速度
       vy: axisX
         ? 0
         : (speed / 100) * direction,
 
-      // --------------------------------------
-      // 発生時刻
-      // --------------------------------------
-
+      // 生成時刻
       born: now,
 
       marker
@@ -1409,7 +1596,7 @@ export function createVisualizer(mount) {
   function uploadGravity(now) {
 
     // ========================================
-    // 影響力0の重力点を削除
+    // 消滅した重力点を削除
     // ========================================
 
     for (
@@ -1435,10 +1622,6 @@ export function createVisualizer(mount) {
     // ========================================
     // テクスチャサイズ計算
     // ========================================
-
-    // 1重力点 = 1テクセル
-    // RGBA:
-    // x, y, radius, strength
 
     const texels = Math.max(
       1,
@@ -1509,7 +1692,7 @@ export function createVisualizer(mount) {
     );
 
     // ========================================
-    // 各重力点を更新
+    // 重力点の更新
     // ========================================
 
     for (
@@ -1523,34 +1706,32 @@ export function createVisualizer(mount) {
       const elapsed =
         now - point.born;
 
-      // ======================================
-      // 重力点の現在位置
-      // ======================================
+      // --------------------------------------
+      // 現在位置
+      // --------------------------------------
 
-      // X軸：画面幅基準
       const x =
         (
           point.x +
           point.vx * elapsed
         ) * width;
 
-      // Y軸：画面高さ基準
       const y =
         (
           point.y +
           point.vy * elapsed
         ) * height;
 
-      // ======================================
-      // 影響半径をpxへ変換
-      // ======================================
+      // --------------------------------------
+      // 半径（% → px）
+      // --------------------------------------
 
       const radiusPx =
         point.radius / 100 * baseSize;
 
-      // ======================================
-      // 引力をpx/秒²へ変換
-      // ======================================
+      // --------------------------------------
+      // 引力（%/秒² → px/秒²）
+      // --------------------------------------
 
       const currentStrength =
         effectiveStrength(point, now);
@@ -1558,24 +1739,20 @@ export function createVisualizer(mount) {
       const strengthPx =
         currentStrength / 100 * height;
 
-      // ======================================
-      // GPU転送データ
-      // ======================================
+      // --------------------------------------
+      // GPUデータ
+      // --------------------------------------
 
       const index = i * 4;
 
       texPixels[index] = x;
       texPixels[index + 1] = y;
+      texPixels[index + 2] = radiusPx;
+      texPixels[index + 3] = strengthPx;
 
-      texPixels[index + 2] =
-        radiusPx;
-
-      texPixels[index + 3] =
-        strengthPx;
-
-      // ======================================
+      // --------------------------------------
       // 表示マーカー
-      // ======================================
+      // --------------------------------------
 
       if (point.marker) {
 
@@ -1651,7 +1828,7 @@ export function createVisualizer(mount) {
   }
 
   // ========================================
-  // 消滅粒子管理
+  // 消滅粒子の管理
   // ========================================
 
   function expireParticles(now) {
@@ -1708,15 +1885,27 @@ export function createVisualizer(mount) {
         new Float32Array(count * 4);
     }
 
+    // メタデータは1粒子あたり3要素
     if (
-      stagingMeta.length < count * 2
+      stagingMeta.length < count * 3
     ) {
 
       stagingMeta =
-        new Float32Array(count * 2);
+        new Float32Array(count * 3);
     }
 
     const flag = attack ? 1 : 0;
+
+    // ========================================
+    // 生成時のLFOの値を固定
+    // ========================================
+
+    // このフレームで生成する粒子は
+    // 同じ到達色を持つ
+    //
+    // 次のフレームでは別の値になる
+
+    const targetColor = colorLfoValue;
 
     // ========================================
     // 波形から粒子生成
@@ -1754,7 +1943,9 @@ export function createVisualizer(mount) {
         SPEED_MULTIPLIER;
 
       const k = i * 4;
-      const m = i * 2;
+
+      // メタデータは3要素
+      const m = i * 3;
 
       // ======================================
       // 初期位置
@@ -1779,8 +1970,15 @@ export function createVisualizer(mount) {
       // メタデータ
       // ======================================
 
+      // 生成時刻
       stagingMeta[m] = now;
+
+      // アタック判定
       stagingMeta[m + 1] = flag;
+
+      // LFOによる到達色
+      // 生成時の値を保存
+      stagingMeta[m + 2] = targetColor;
     }
 
     // ========================================
@@ -1806,7 +2004,7 @@ export function createVisualizer(mount) {
     }
 
     // ========================================
-    // GPUへ粒子転送
+    // GPUへ新規粒子を転送
     // ========================================
 
     for (
@@ -1818,6 +2016,10 @@ export function createVisualizer(mount) {
           src * 4,
           (src + length) * 4
         );
+
+      // --------------------------------------
+      // 位置と速度
+      // --------------------------------------
 
       for (const buffer of states) {
 
@@ -1833,7 +2035,10 @@ export function createVisualizer(mount) {
         );
       }
 
+      // --------------------------------------
       // メタデータ
+      // --------------------------------------
+
       gl.bindBuffer(
         gl.ARRAY_BUFFER,
         metaBuffer
@@ -1843,14 +2048,14 @@ export function createVisualizer(mount) {
         gl.ARRAY_BUFFER,
         start * META_BYTES,
         stagingMeta.subarray(
-          src * 2,
-          (src + length) * 2
+          src * 3,
+          (src + length) * 3
         )
       );
     }
 
     // ========================================
-    // 消滅時刻を登録
+    // 消滅時刻登録
     // ========================================
 
     const expiry = expiration(
@@ -2013,7 +2218,7 @@ export function createVisualizer(mount) {
     gl.bindVertexArray(null);
 
     // ========================================
-    // 次フレームへ計算結果を引き継ぐ
+    // 次フレームへ結果を引き継ぐ
     // ========================================
 
     currentState = target;
@@ -2161,15 +2366,30 @@ export function createVisualizer(mount) {
       // フレーム時間
       // ======================================
 
+      const elapsed = Math.max(
+        now - previousTime,
+        0
+      );
+
+      // GPUシミュレーション用の時間
       const step = Math.min(
-        Math.max(
-          now - previousTime,
-          0
-        ),
+        elapsed,
         1 / 30
       );
 
       previousTime = now;
+
+      // ======================================
+      // 到達色LFOの更新
+      // ======================================
+
+      // LFOは実際の経過時間で進める
+      // 粒子の物理演算とは独立させる
+
+      updateColorLfo(
+        now,
+        elapsed
+      );
 
       // ======================================
       // アタック検出
@@ -2182,9 +2402,6 @@ export function createVisualizer(mount) {
       // ======================================
       // アタック時の重力点生成
       // ======================================
-
-      // アタックの立ち上がりで生成
-      // その瞬間の波形を渡す
 
       if (
         attack &&
@@ -2207,13 +2424,13 @@ export function createVisualizer(mount) {
         uploadGravity(now);
 
       // ======================================
-      // 消滅パーティクル管理
+      // 消滅粒子管理
       // ======================================
 
       expireParticles(now);
 
       // ======================================
-      // 既存パーティクルの物理演算
+      // 既存粒子の物理演算
       // ======================================
 
       simulate(
@@ -2223,8 +2440,11 @@ export function createVisualizer(mount) {
       );
 
       // ======================================
-      // 新規パーティクル生成
+      // 新規粒子生成
       // ======================================
+
+      // この瞬間のcolorLfoValueが
+      // 各粒子の到達色として保存される
 
       spawnParticles(
         audio?.waveform,
@@ -2247,14 +2467,20 @@ export function createVisualizer(mount) {
 
       observer.disconnect();
 
+      // ======================================
       // 重力点削除
+      // ======================================
+
       for (const point of gravityPoints) {
         point.marker?.remove();
       }
 
       gravityPoints.length = 0;
 
+      // ======================================
       // GPUリソース削除
+      // ======================================
+
       gl.deleteTransformFeedback(
         feedback
       );
@@ -2280,7 +2506,10 @@ export function createVisualizer(mount) {
       gl.deleteProgram(simulation);
       gl.deleteProgram(rendering);
 
+      // ======================================
       // DOM削除
+      // ======================================
+
       markerLayer.remove();
       centerLine.remove();
       canvas.remove();
