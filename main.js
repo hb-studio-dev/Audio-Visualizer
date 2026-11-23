@@ -2,7 +2,7 @@ import { AudioAnalyser } from "./audio/audioAnalyser.js?v=meter-clean-v3";
 import { AudioSelector } from "./audio/audioSelector.js";
 import { SettingsMenu } from "./ui/settingsMenu.js?v=meter-clean-v3";
 // ★ 新しいページで差し替えるのは、基本的にこの1行だけ
-import { createVisualizer } from "./visualizers/particle-wave.js";
+import { createVisualizer } from "./visualizers/particle-wave-gravity.js";
 
 const $ = (id) => document.getElementById(id);
 const initial = $("initialDeviceSelect"),
