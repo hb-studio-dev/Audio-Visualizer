@@ -1,4 +1,4 @@
-import { DEVICE_DEFAULT_SETTINGS } from "../audio/audioAnalyser.js?v=fast-audio-v1";
+import { DEVICE_DEFAULT_SETTINGS, CROSSOVER_MIN_HZ, CROSSOVER_MAX_HZ, normalizeCrossovers } from "../audio/audioAnalyser.js?v=crossover-v1";
 
 const CONTROL_DEFS = [
   {
@@ -15,7 +15,25 @@ const CONTROL_DEFS = [
     min: -100,
     max: 100,
     step: 0.1,
-    description: "Increase in full-band RMS since the previous frame (dBFS).",
+    description: "Increase in the full-band RMS envelope (dBFS).",
+  },
+  {
+    key: "lowMidCrossoverHz",
+    label: "Low / Mid Crossover",
+    min: CROSSOVER_MIN_HZ,
+    max: CROSSOVER_MAX_HZ,
+    step: 1,
+    unit: "Hz",
+    description: "Cutoff shared by the low-pass and mid-band high-pass filters.",
+  },
+  {
+    key: "midHighCrossoverHz",
+    label: "Mid / High Crossover",
+    min: CROSSOVER_MIN_HZ,
+    max: CROSSOVER_MAX_HZ,
+    step: 1,
+    unit: "Hz",
+    description: "Cutoff shared by the mid-band low-pass and high-pass filters.",
   },
   {
     key: "lowAttackThresholdDb",
@@ -23,7 +41,7 @@ const CONTROL_DEFS = [
     min: -100,
     max: 100,
     step: 0.1,
-    description: "Increase in low-band RMS (approximately below 250 Hz), in dBFS.",
+    description: "Increase in low-band RMS (below Low / Mid Crossover), in dBFS.",
   },
   {
     key: "midAttackThresholdDb",
@@ -31,7 +49,7 @@ const CONTROL_DEFS = [
     min: -100,
     max: 100,
     step: 0.1,
-    description: "Increase in mid-band RMS (approximately 250–4000 Hz), in dBFS.",
+    description: "Increase in mid-band RMS (between the two crossovers), in dBFS.",
   },
   {
     key: "highAttackThresholdDb",
@@ -39,7 +57,7 @@ const CONTROL_DEFS = [
     min: -100,
     max: 100,
     step: 0.1,
-    description: "Increase in high-band RMS (approximately above 4000 Hz), in dBFS.",
+    description: "Increase in high-band RMS (above Mid / High Crossover), in dBFS.",
   },
   {
     key: "peakThresholdDb",
@@ -61,6 +79,13 @@ export function getDeviceProfile() {
 const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
 const clean = (value) => Math.round(value * 10) / 10;
 const labelDb = (value) => `${value > 0 ? "+" : ""}${value.toFixed(1)} dB`;
+
+// Logarithmic frequency controls give bass and treble comparable travel per octave.
+const isFrequency = (def) => def.unit === "Hz";
+const LOG_STEPS = 1000;
+const frequencyToSlider = (def, hz) => LOG_STEPS * Math.log(hz / def.min) / Math.log(def.max / def.min);
+const sliderToFrequency = (def, position) => Math.round(def.min * Math.pow(def.max / def.min, position / LOG_STEPS));
+const cleanValue = (def, value) => isFrequency(def) ? Math.round(value) : clean(value);
 
 export class SettingsMenu {
   constructor(onSettingsChange) {
@@ -108,7 +133,7 @@ export class SettingsMenu {
       title.textContent = def.label;
       const output = document.createElement("output");
       // しきい値に対応する検出ランプ（入力ゲインには付けない）
-      if (def.key !== "inputGainDb") {
+      if (def.key !== "inputGainDb" && !isFrequency(def)) {
         const lamp = document.createElement("span");
         lamp.className = "detection-lamp";
         lamp.setAttribute("role", "status");
@@ -122,9 +147,9 @@ export class SettingsMenu {
       const range = document.createElement("input");
       range.type = "range";
       range.id = `setting-${def.key}`;
-      range.min = String(def.min);
-      range.max = String(def.max);
-      range.step = String(def.step);
+      range.min = String(isFrequency(def) ? 0 : def.min);
+      range.max = String(isFrequency(def) ? LOG_STEPS : def.max);
+      range.step = String(isFrequency(def) ? 1 : def.step);
 
       const numberRow = document.createElement("div");
       numberRow.className = "setting-number-row";
@@ -134,9 +159,9 @@ export class SettingsMenu {
       number.max = String(def.max);
       number.step = String(def.step);
       number.id = `setting-number-${def.key}`;
-      number.setAttribute("aria-label", `${def.label} (dB)`);
+      number.setAttribute("aria-label", `${def.label} (${def.unit || "dB"})`);
       const unit = document.createElement("span");
-      unit.textContent = "dB";
+      unit.textContent = def.unit || "dB";
       numberRow.append(number, unit);
 
       const help = document.createElement("small");
@@ -166,7 +191,8 @@ export class SettingsMenu {
       }
       this.inputs.set(def.key, { range, number, output });
 
-      range.addEventListener("input", () => this.change(def, range.value));
+      range.addEventListener("input", () => this.change(def, isFrequency(def)
+        ? sliderToFrequency(def, Number(range.value)) : range.value));
       number.addEventListener("change", () => this.change(def, number.value));
       number.addEventListener("keydown", (event) => {
         if (event.key === "Enter") number.blur();
@@ -196,10 +222,10 @@ export class SettingsMenu {
     for (const def of CONTROL_DEFS) {
       const value = Number(stored[def.key]);
       if (stored[def.key] != null && Number.isFinite(value)) {
-        settings[def.key] = clean(clamp(value, def.min, def.max));
+        settings[def.key] = cleanValue(def, clamp(value, def.min, def.max));
       }
     }
-    return settings;
+    return { ...settings, ...normalizeCrossovers(settings) };
   }
 
   change(def, rawValue) {
@@ -212,17 +238,23 @@ export class SettingsMenu {
       this.syncControl(def);
       return;
     }
-    this.values[def.key] = clean(clamp(number, def.min, def.max));
-    this.syncControl(def);
+    this.values[def.key] = cleanValue(def, clamp(number, def.min, def.max));
+    if (isFrequency(def)) {
+      Object.assign(this.values, normalizeCrossovers(this.values, def.key));
+      for (const crossover of CONTROL_DEFS.filter(isFrequency)) this.syncControl(crossover);
+    } else {
+      this.syncControl(def);
+    }
     this.emit();
   }
 
   syncControl(def) {
     const { range, number, output } = this.inputs.get(def.key);
-    const value = clean(this.values[def.key]);
-    range.value = String(value);
-    number.value = value.toFixed(1);
-    output.textContent = labelDb(value);
+    const value = cleanValue(def, this.values[def.key]);
+    range.value = String(isFrequency(def) ? Math.round(frequencyToSlider(def, value)) : value);
+    number.value = isFrequency(def) ? String(value) : value.toFixed(1);
+    output.textContent = isFrequency(def) ? `${value.toLocaleString("en-US")} Hz` : labelDb(value);
+    if (isFrequency(def)) range.setAttribute("aria-valuetext", `${value} Hz`);
   }
 
   syncControls() {

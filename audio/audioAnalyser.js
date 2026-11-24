@@ -12,8 +12,33 @@ export const DEFAULT_THRESHOLDS_DB = Object.freeze({
   peakThresholdDb: amplitudeToDb(0.72),
 });
 
+export const CROSSOVER_MIN_HZ = 20;
+export const CROSSOVER_MAX_HZ = 20000;
+export const CROSSOVER_KEYS = ['lowMidCrossoverHz', 'midHighCrossoverHz'];
+
+// Preserve the existing band boundaries by default. Keep the two frequencies ordered.
+export function normalizeCrossovers(settings, editedKey) {
+  const hz = (value, fallback) => Number.isFinite(value)
+    ? Math.round(Math.max(CROSSOVER_MIN_HZ, Math.min(CROSSOVER_MAX_HZ, value)))
+    : fallback;
+  let low = hz(settings.lowMidCrossoverHz, 250);
+  let high = hz(settings.midHighCrossoverHz, 4000);
+  if (low >= high) {
+    if (editedKey === 'midHighCrossoverHz') {
+      low = Math.min(low, CROSSOVER_MAX_HZ - 1);
+      high = low + 1;
+    } else {
+      high = Math.max(high, CROSSOVER_MIN_HZ + 1);
+      low = high - 1;
+    }
+  }
+  return { lowMidCrossoverHz: low, midHighCrossoverHz: high };
+}
+
 export const DEFAULT_SETTINGS = Object.freeze({
   inputGainDb: 18,
+  lowMidCrossoverHz: 250,
+  midHighCrossoverHz: 4000,
   ...DEFAULT_THRESHOLDS_DB,
 });
 
@@ -46,6 +71,7 @@ export class AudioAnalyser {
     this.pendingVolumes = new Float64Array(4);
     this.pendingPeak = 0;
     this.nodes = [];
+    this.bandFilters = null;
     this.sampleBuffers = [];
     this.previous = { full: 0, low: 0, mid: 0, high: 0 };
     this.waveform = new Float32Array(1024);
@@ -111,7 +137,9 @@ export class AudioAnalyser {
   }
 
   setSettings(settings = {}) {
-    this.settings = { ...this.settings, ...settings };
+    const previous = this.settings;
+    this.settings = { ...previous, ...settings };
+    Object.assign(this.settings, normalizeCrossovers(this.settings));
     this.inputGain = dbToAmplitude(this.settings.inputGainDb);
     this.thresholds = {
       attack: dbToAmplitude(this.settings.attackThresholdDb),
@@ -121,9 +149,32 @@ export class AudioAnalyser {
       peak: dbToAmplitude(this.settings.peakThresholdDb),
     };
     if (this.gainNode) this.gainNode.gain.value = this.inputGain;
+    if (CROSSOVER_KEYS.some(key => previous[key] !== this.settings[key])) {
+      this.applyCrossovers();
+    }
     if (this.worklet) this.worklet.port.postMessage({
       type: 'settings', thresholds: this.workletThresholds(),
     });
+  }
+
+  crossoverFrequencies(ctx) {
+    // Web Audio cutoffs must stay below Nyquist, including low-rate devices.
+    const high = Math.min(this.settings.midHighCrossoverHz, ctx.sampleRate * 0.49);
+    const low = Math.min(this.settings.lowMidCrossoverHz, high - 1);
+    return [low, high];
+  }
+
+  applyCrossovers() {
+    if (!this.ctx || !this.bandFilters) return;
+    const [low, high] = this.crossoverFrequencies(this.ctx);
+    const { lowPass, midLow, midHigh, highPass } = this.bandFilters;
+    const now = this.ctx.currentTime;
+    // Update the shared filter graph without restarting the stream/worklet.
+    for (const [filter, frequency] of [[lowPass, low], [midLow, low],
+      [midHigh, high], [highPass, high]]) {
+      filter.frequency.cancelScheduledValues(now);
+      filter.frequency.setTargetAtTime(frequency, now, 0.01);
+    }
   }
 
   async useStream(stream) {
@@ -151,13 +202,14 @@ export class AudioAnalyser {
           gain.connect(filter);
           return filter;
         };
-        const low = createBand("lowpass", 250);
-        const midLow = createBand("highpass", 250);
+        const [lowHz, highHz] = this.crossoverFrequencies(ctx);
+        const low = createBand("lowpass", lowHz);
+        const midLow = createBand("highpass", lowHz);
         const midHigh = ctx.createBiquadFilter();
         midHigh.type = "lowpass";
-        midHigh.frequency.value = 4000;
+        midHigh.frequency.value = highHz;
         midLow.connect(midHigh);
-        const high = createBand("highpass", 4000);
+        const high = createBand("highpass", highHz);
         const bands = [gain, low, midHigh, high];
         const nodes = bands.map((node) => {
           const analyser = ctx.createAnalyser();
@@ -190,7 +242,8 @@ export class AudioAnalyser {
           worklet = null;
           console.warn('AudioWorklet unavailable; using short-window analyser fallback.', error);
         }
-        graph = { gain, nodes, silentSink, worklet };
+        graph = { gain, nodes, silentSink, worklet,
+          bandFilters: { lowPass: low, midLow, midHigh, highPass: high } };
       }
 
       newSource = ctx.createMediaStreamSource(stream);
@@ -211,6 +264,8 @@ export class AudioAnalyser {
       this.gainNode = graph.gain;
       this.gainNode.gain.value = this.inputGain;
       this.nodes = graph.nodes;
+      this.bandFilters = graph.bandFilters;
+      this.applyCrossovers();
       this.silentSink = graph.silentSink;
       this.worklet = graph.worklet;
       if (this.worklet) {
@@ -311,6 +366,7 @@ export class AudioAnalyser {
     this.ctx = null;
     this.stream = null;
     this.nodes = [];
+    this.bandFilters = null;
     this.sampleBuffers = [];
     this.waveform = new Float32Array(1024);
     this.gainNode = null;

@@ -43,13 +43,20 @@ the browser; their language may depend on the operating system or drivers.
 The top-right buttons open fullscreen and the settings sidebar. Both fade out
 after 3 seconds of inactivity and return when you interact with the page.
 The settings menu controls input gain, full-band/low/mid/high attack detection,
-and peak detection. The input-level meter shows the gain-adjusted RMS level in
+crossover frequencies, and peak detection. The input-level meter shows the gain-adjusted RMS level in
 dBFS and threshold lamps light when attacks are detected.
 
 - Desktop default gain: **0 dB**
 - Mobile default gain: **+30 dB**
 - Gain range: **−70 to +100 dB**, step **0.1 dB**
 - Threshold range: **−100 to +100 dB**, step **0.1 dB**
+- Low / Mid Crossover: **250 Hz** by default
+- Mid / High Crossover: **4,000 Hz** by default
+- Crossover controls: **20–20,000 Hz**, logarithmic sliders and 1 Hz numeric entry.
+  Low / Mid must stay below Mid / High. Filters update live, without reconnecting
+  the audio source, for both AudioWorklet and the fallback analyzer. Cutoffs are
+  limited below Nyquist on low-sample-rate devices. Changing cutoffs during sound
+  may itself produce a band attack.
 
 Settings are retained locally using the separate keys
 `audioVisualizerSettingsDb:v1:desktop` and
@@ -67,9 +74,9 @@ The renderer receives the following values in each `update(audio, dt)` call:
 | `inputLevel` | Gain-adjusted full-band RMS without the 1.0 cap |
 | `rawVolume` | RMS before input gain |
 | `attack`, `attackTriggered` | Full-band envelope increase and detection flag |
-| `lowAttack`, `lowAttackTriggered` | Low-band (approximately below 250 Hz) |
-| `midAttack`, `midAttackTriggered` | Mid-band (approximately 250–4000 Hz) |
-| `highAttack`, `highAttackTriggered` | High-band (approximately above 4000 Hz) |
+| `lowAttack`, `lowAttackTriggered` | Low-band (below Low / Mid crossover; default 250 Hz) |
+| `midAttack`, `midAttackTriggered` | Mid-band (between crossovers; default 250–4000 Hz) |
+| `highAttack`, `highAttackTriggered` | High-band (above Mid / High crossover; default 4000 Hz) |
 | `peak`, `peakTriggered` | Peak sample amplitude and detection flag |
 | `waveform` | Reused `Float32Array(1024)` of time-domain audio samples |
 | `attackEventMode` | True when flags are consumed audio-thread events (do not edge-detect them again) |

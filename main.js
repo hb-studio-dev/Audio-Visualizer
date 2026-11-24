@@ -1,6 +1,6 @@
-import { AudioAnalyser } from "./audio/audioAnalyser.js?v=fast-audio-v1";
+import { AudioAnalyser } from "./audio/audioAnalyser.js?v=crossover-v1";
 import { AudioSelector } from "./audio/audioSelector.js?v=fast-audio-v1";
-import { SettingsMenu } from "./ui/settingsMenu.js?v=fast-audio-v1";
+import { SettingsMenu } from "./ui/settingsMenu.js?v=crossover-v1";
 // Replace this import to load a different visualizer.
 import { createVisualizer } from "./visualizers/particle-wave-gravity.js?v=fast-audio-v1";
 
