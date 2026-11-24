@@ -27,7 +27,7 @@ export function createVisualizer(mount) {
 
     // 同時に存在できる重力点の最大数
     // 上限に達したら最古の重力点を置き換える
-    const GRAVITY_MAX_POINTS = 8;
+    const GRAVITY_MAX_POINTS = 6;
 
     const GRAVITY_SPEED_MIN = 0;
     const GRAVITY_SPEED_MAX = 5;
@@ -37,8 +37,8 @@ export function createVisualizer(mount) {
     const GRAVITY_VOLUME_INFLUENCE = 0.8;
     const GRAVITY_VOLUME_REFERENCE = 0.25;
     const GRAVITY_RADIUS_MIN = 70;
-    const GRAVITY_RADIUS_MAX = 130;
-    const GRAVITY_DECAY_RATE = 0.1;
+    const GRAVITY_RADIUS_MAX = 200;
+    const GRAVITY_DECAY_RATE = 0.07;
     const GRAVITY_DECAY_CURVE = 1.8;
     const GRAVITY_ZERO_THRESHOLD = 0.001;
     const GRAVITY_SHOW_MARKERS = false;
