@@ -39,6 +39,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   inputGainDb: 18,
   lowMidCrossoverHz: 120,
   midHighCrossoverHz: 4000,
+  bandSeparationDb: -9,
   ...DEFAULT_THRESHOLDS_DB,
 });
 
@@ -55,6 +56,15 @@ const rms = (data, size = data.length) => {
   return Math.sqrt(sum / (data.length - start));
 };
 const FAST_WINDOWS = [256, 512, 256, 256];
+// Web Audio lowpass/highpass Q is a dB value, not a linear Q factor.
+const BUTTERWORTH_Q_DB = 20 * Math.log10(Math.SQRT1_2);
+const bandSeparationRatio = (db) => db <= -60 ? 0 : dbToAmplitude(db);
+const passesBandSeparation = (index, deltas, ratio) => {
+  if (index === 0 || ratio === 0) return true;
+  const left = index > 1 ? deltas[index - 1] : 0;
+  const right = index < 3 ? deltas[index + 1] : 0;
+  return deltas[index] >= Math.max(left, right) * ratio;
+};
 
 export class AudioAnalyser {
   constructor(settings = {}) {
@@ -109,6 +119,10 @@ export class AudioAnalyser {
     return [t.attack, t.low, t.mid, t.high];
   }
 
+  workletSettings() {
+    return { thresholds: this.workletThresholds(), separationRatio: this.separationRatio };
+  }
+
   clearPending() {
     this.pendingDeltas.fill(0);
     this.pendingFlags.fill(false);
@@ -120,7 +134,7 @@ export class AudioAnalyser {
     this.fastLevel = 0;
     this.clearPending();
     if (this.worklet) {
-      this.worklet.port.postMessage({ type: 'settings', thresholds: this.workletThresholds() });
+      this.worklet.port.postMessage({ type: 'settings', ...this.workletSettings() });
       this.worklet.port.postMessage({ type: 'reset', epoch: ++this.workletEpoch });
     }
   }
@@ -141,6 +155,10 @@ export class AudioAnalyser {
     this.settings = { ...previous, ...settings };
     Object.assign(this.settings, normalizeCrossovers(this.settings));
     this.inputGain = dbToAmplitude(this.settings.inputGainDb);
+    const separationDb = Number.isFinite(this.settings.bandSeparationDb)
+      ? clamp(this.settings.bandSeparationDb, -60, 0) : DEFAULT_SETTINGS.bandSeparationDb;
+    this.settings.bandSeparationDb = separationDb;
+    this.separationRatio = bandSeparationRatio(separationDb);
     this.thresholds = {
       attack: dbToAmplitude(this.settings.attackThresholdDb),
       low: dbToAmplitude(this.settings.lowAttackThresholdDb),
@@ -153,7 +171,7 @@ export class AudioAnalyser {
       this.applyCrossovers();
     }
     if (this.worklet) this.worklet.port.postMessage({
-      type: 'settings', thresholds: this.workletThresholds(),
+      type: 'settings', ...this.workletSettings(),
     });
   }
 
@@ -198,7 +216,7 @@ export class AudioAnalyser {
           const filter = ctx.createBiquadFilter();
           filter.type = type;
           filter.frequency.value = frequency;
-          filter.Q.value = 0.707;
+          filter.Q.value = BUTTERWORTH_Q_DB;
           gain.connect(filter);
           return filter;
         };
@@ -208,6 +226,7 @@ export class AudioAnalyser {
         const midHigh = ctx.createBiquadFilter();
         midHigh.type = "lowpass";
         midHigh.frequency.value = highHz;
+        midHigh.Q.value = BUTTERWORTH_Q_DB;
         midLow.connect(midHigh);
         const high = createBand("highpass", highHz);
         const bands = [gain, low, midHigh, high];
@@ -228,11 +247,11 @@ export class AudioAnalyser {
         // keep its full-band 1024-sample waveform for all visualizers.
         try {
           if (ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
-            await ctx.audioWorklet.addModule(new URL('./analysisProcessor.js?v=fast-audio-v1', import.meta.url));
+            await ctx.audioWorklet.addModule(new URL('./analysisProcessor.js?v=band-separation-v1', import.meta.url));
             worklet = new AudioWorkletNode(ctx, 'fast-audio-analysis', {
               numberOfInputs: 4, numberOfOutputs: 1, outputChannelCount: [1],
               channelCount: 1, channelCountMode: 'explicit', channelInterpretation: 'speakers',
-              processorOptions: { thresholds: this.workletThresholds() },
+              processorOptions: this.workletSettings(),
             });
             bands.forEach((band, i) => band.connect(worklet, 0, i));
             worklet.connect(silentSink);
@@ -327,6 +346,7 @@ export class AudioAnalyser {
     const lowAttack = Math.max(0, low - this.previous.low);
     const midAttack = Math.max(0, mid - this.previous.mid);
     const highAttack = Math.max(0, high - this.previous.high);
+    const deltas = [attack, lowAttack, midAttack, highAttack];
     Object.assign(this.previous, { full, low, mid, high });
     let peak = 0;
     for (const sample of this.sampleBuffers[0]) {
@@ -339,11 +359,14 @@ export class AudioAnalyser {
       attack,
       attackTriggered: attack >= this.thresholds.attack,
       lowAttack,
-      lowAttackTriggered: lowAttack >= this.thresholds.low,
+      lowAttackTriggered: lowAttack >= this.thresholds.low &&
+        passesBandSeparation(1, deltas, this.separationRatio),
       midAttack,
-      midAttackTriggered: midAttack >= this.thresholds.mid,
+      midAttackTriggered: midAttack >= this.thresholds.mid &&
+        passesBandSeparation(2, deltas, this.separationRatio),
       highAttack,
-      highAttackTriggered: highAttack >= this.thresholds.high,
+      highAttackTriggered: highAttack >= this.thresholds.high &&
+        passesBandSeparation(3, deltas, this.separationRatio),
       peak,
       peakTriggered: peak >= this.thresholds.peak,
       waveform: this.waveform,

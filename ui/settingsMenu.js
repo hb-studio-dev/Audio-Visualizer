@@ -1,4 +1,4 @@
-import { DEVICE_DEFAULT_SETTINGS, CROSSOVER_MIN_HZ, CROSSOVER_MAX_HZ, normalizeCrossovers } from "../audio/audioAnalyser.js?v=crossover-v1";
+import { DEVICE_DEFAULT_SETTINGS, CROSSOVER_MIN_HZ, CROSSOVER_MAX_HZ, normalizeCrossovers } from "../audio/audioAnalyser.js?v=band-separation-v1";
 
 const CONTROL_DEFS = [
   {
@@ -34,6 +34,14 @@ const CONTROL_DEFS = [
     step: 1,
     unit: "Hz",
     description: "Cutoff shared by the mid-band low-pass and high-pass filters.",
+  },
+  {
+    key: "bandSeparationDb",
+    label: "Band Separation",
+    min: -60,
+    max: 0,
+    step: 0.1,
+    description: "Reject weak attacks relative to adjacent bands. Closer to 0 dB is stricter; -60 dB disables this check. No extra analysis window.",
   },
   {
     key: "lowAttackThresholdDb",
@@ -133,7 +141,7 @@ export class SettingsMenu {
       title.textContent = def.label;
       const output = document.createElement("output");
       // しきい値に対応する検出ランプ（入力ゲインには付けない）
-      if (def.key !== "inputGainDb" && !isFrequency(def)) {
+      if (def.key !== "inputGainDb" && def.key !== "bandSeparationDb" && !isFrequency(def)) {
         const lamp = document.createElement("span");
         lamp.className = "detection-lamp";
         lamp.setAttribute("role", "status");
@@ -253,7 +261,7 @@ export class SettingsMenu {
     const value = cleanValue(def, this.values[def.key]);
     range.value = String(isFrequency(def) ? Math.round(frequencyToSlider(def, value)) : value);
     number.value = isFrequency(def) ? String(value) : value.toFixed(1);
-    output.textContent = isFrequency(def) ? `${value.toLocaleString("en-US")} Hz` : labelDb(value);
+    output.textContent = isFrequency(def) ? `${value.toLocaleString("en-US")} Hz` : def.key === "bandSeparationDb" && value <= -60 ? "OFF" : labelDb(value);
     if (isFrequency(def)) range.setAttribute("aria-valuetext", `${value} Hz`);
   }
 

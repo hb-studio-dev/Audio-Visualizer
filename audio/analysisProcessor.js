@@ -14,6 +14,7 @@ class FastAnalysisProcessor extends AudioWorkletProcessor {
     super();
     const config = options.processorOptions || {};
     this.thresholds = config.thresholds || [Infinity, Infinity, Infinity, Infinity];
+    this.separationRatio = config.separationRatio ?? 0;
     this.epoch = 0;
     this.lookback = Math.max(1, Math.round(sampleRate * ATTACK_LOOKBACK_MS / 1000 / HOP_SAMPLES));
     this.hold = Math.max(1, Math.ceil(sampleRate * ATTACK_HOLD_MS / 1000 / HOP_SAMPLES));
@@ -27,12 +28,16 @@ class FastAnalysisProcessor extends AudioWorkletProcessor {
     }));
     this.levels = new Float64Array(4);
     this.deltas = new Float64Array(4);
+    this.hopDeltas = new Float64Array(4);
     this.flags = new Array(4).fill(false);
     this.eventVolumes = new Float64Array(4);
     this.reset(0);
     this.port.onmessage = ({ data }) => {
       if (data.type === 'reset') this.reset(data.epoch);
-      if (data.type === 'settings') this.thresholds = data.thresholds;
+      if (data.type === 'settings') {
+        this.thresholds = data.thresholds;
+        this.separationRatio = data.separationRatio ?? 0;
+      }
     };
   }
 
@@ -44,6 +49,7 @@ class FastAnalysisProcessor extends AudioWorkletProcessor {
     this.peak = 0;
     this.levels.fill(0);
     this.deltas.fill(0);
+    this.hopDeltas.fill(0);
     this.flags.fill(false);
     this.eventVolumes.fill(0);
     for (const b of this.bands) {
@@ -75,11 +81,24 @@ class FastAnalysisProcessor extends AudioWorkletProcessor {
       b.history[b.historyIndex] = b.envelope;
       b.historyIndex = (b.historyIndex + 1) % this.lookback;
       const delta = Math.max(0, b.envelope - previous);
+      this.hopDeltas[i] = delta;
       this.deltas[i] = Math.max(this.deltas[i], delta);
+    }
+    // Compare the current hop only, never wait for a future hop. Full-band
+    // attacks stay independent; adjacent bands may both trigger if comparable.
+    for (let i = 0; i < 4; i++) {
+      const b = this.bands[i];
+      const delta = this.hopDeltas[i];
+      const left = i > 1 ? this.hopDeltas[i - 1] : 0;
+      const right = i > 0 && i < 3 ? this.hopDeltas[i + 1] : 0;
+      const separated = i === 0 || delta >= Math.max(left, right) * this.separationRatio;
       const threshold = this.thresholds[i];
       if (delta < threshold * ATTACK_REARM_RATIO) b.armed = true;
       if (b.armed && delta >= threshold && this.hopNumber - b.lastAttack >= this.minInterval) {
+        // Consume a rejected threshold crossing as well: do not let a weak
+        // leaked onset fire late merely because its neighbour has decayed.
         b.armed = false;
+        if (!separated) continue;
         b.lastAttack = this.hopNumber;
         this.flags[i] = true;
         hasEvent = true;

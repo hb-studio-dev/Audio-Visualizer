@@ -50,8 +50,13 @@ dBFS and threshold lamps light when attacks are detected.
 - Mobile default gain: **+30 dB**
 - Gain range: **−70 to +100 dB**, step **0.1 dB**
 - Threshold range: **−100 to +100 dB**, step **0.1 dB**
-- Low / Mid Crossover: **250 Hz** by default
+- Low / Mid Crossover: **120 Hz** by default
 - Mid / High Crossover: **4,000 Hz** by default
+- Band Separation: **−9 dB** by default. A band attack must also be at least
+  35.5% of the stronger adjacent band's onset magnitude. Closer to 0 dB is
+  stricter; −60 dB disables the relative check. Full-band/peak detection and
+  raw attack magnitudes are unchanged. The check uses the same analysis hop
+  (or frame in fallback mode); there is no lookahead or extra buffer.
 - Crossover controls: **20–20,000 Hz**, logarithmic sliders and 1 Hz numeric entry.
   Low / Mid must stay below Mid / High. Filters update live, without reconnecting
   the audio source, for both AudioWorklet and the fallback analyzer. Cutoffs are
@@ -74,8 +79,8 @@ The renderer receives the following values in each `update(audio, dt)` call:
 | `inputLevel` | Gain-adjusted full-band RMS without the 1.0 cap |
 | `rawVolume` | RMS before input gain |
 | `attack`, `attackTriggered` | Full-band envelope increase and detection flag |
-| `lowAttack`, `lowAttackTriggered` | Low-band (below Low / Mid crossover; default 250 Hz) |
-| `midAttack`, `midAttackTriggered` | Mid-band (between crossovers; default 250–4000 Hz) |
+| `lowAttack`, `lowAttackTriggered` | Low-band (below Low / Mid crossover; default 120 Hz) |
+| `midAttack`, `midAttackTriggered` | Mid-band (between crossovers; default 120–4000 Hz) |
 | `highAttack`, `highAttackTriggered` | High-band (above Mid / High crossover; default 4000 Hz) |
 | `peak`, `peakTriggered` | Peak sample amplitude and detection flag |
 | `waveform` | Reused `Float32Array(1024)` of time-domain audio samples |
@@ -89,6 +94,9 @@ and saved settings are retained, but detection sensitivity may differ.
 The AudioWorklet (`audio/analysisProcessor.js`) analyzes every 128 samples,
 using 256-sample RMS windows for full/mid/high and 512 samples for low.
 At 48 kHz this is a 2.67 ms analysis hop with 5.33/10.67 ms windows.
+The crossover uses second-order Butterworth filters (12 dB/oct) with the
+Web Audio Q parameter correctly expressed in dB. No extra filter stages are
+introduced. Filter response changes can still change threshold-crossing times.
 The onset detector compares a fast-rise, slow-release envelope to its value
 about 10 ms earlier, with a 24 ms trailing peak hold to suppress steady bass
 oscillations. A half-threshold rearm and 16 ms minimum interval

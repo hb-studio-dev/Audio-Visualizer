@@ -107,7 +107,7 @@ export function createVisualizer(mount) {
     const ATTACK_SHIFT_X_MAX_DISTANCE = 2; // 画面幅の%
     const ATTACK_SHIFT_X_VOLUME_CURVE = 1.0;
     const ATTACK_SHIFT_X_MAX_INERTIA_SPEED = 20; // 画面幅の%/秒
-    const ATTACK_SHIFT_X_INERTIA_VOLUME_CURVE = 2.0;
+    const ATTACK_SHIFT_X_INERTIA_VOLUME_CURVE = 5.0;
 
     // ========================================
     // Y軸：上下方向へのスライス
@@ -116,8 +116,8 @@ export function createVisualizer(mount) {
     const ATTACK_SHIFT_Y_VOLUME_REFERENCE = 0.25;
     const ATTACK_SHIFT_Y_MAX_DISTANCE = 2; // 画面高さの%
     const ATTACK_SHIFT_Y_VOLUME_CURVE = 1.0;
-    const ATTACK_SHIFT_Y_MAX_INERTIA_SPEED = 40; // 画面高さの%/秒
-    const ATTACK_SHIFT_Y_INERTIA_VOLUME_CURVE = 2.0;
+    const ATTACK_SHIFT_Y_MAX_INERTIA_SPEED = 30; // 画面高さの%/秒
+    const ATTACK_SHIFT_Y_INERTIA_VOLUME_CURVE = 5.0;
 
     // ========================================
     // 描画設定
