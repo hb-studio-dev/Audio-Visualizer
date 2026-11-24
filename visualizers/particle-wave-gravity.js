@@ -1,5 +1,4 @@
 export function createVisualizer(mount) {
-
     // ========================================
     // パーティクル設定
     // ========================================
@@ -31,7 +30,6 @@ export function createVisualizer(mount) {
     // ========================================
 
     const COLOR_LFO_ENABLED = true;
-
     const COLOR_LFO_FREQ_MIN = 0.001;
     const COLOR_LFO_FREQ_MAX = 0.01;
     const COLOR_LFO_FREQ_DRIFT = 0.001;
@@ -81,25 +79,50 @@ export function createVisualizer(mount) {
     const BACKGROUND_COLOR = [9, 11, 18];
 
     // ========================================
-    // 内部最適化設定
-    // 映像の品質・粒子数には影響しない
+    // GPUバッファ最適化設定
     // ========================================
 
-    // 初期バッファ容量を算出するための想定FPS
-    // 実際のFPSを制限するものではない
+    // 1ページあたりの粒子数
+    // 最大粒子数を制限するものではない
+    const PAGE_PARTICLES = 262144;
+
+    // 初期容量を計算するための想定FPS
     const INITIAL_ESTIMATED_FPS = 60;
 
-    // 初期バッファの最小・最大容量
     const INITIAL_MIN_CAPACITY = 262144;
     const INITIAL_MAX_CAPACITY = 1500000;
 
-    // 容量不足時の拡張倍率
-    const PARTICLE_BUFFER_GROWTH = 1.5;
+    // バッチテクスチャを3枚交互に使用
+    const BATCH_TEXTURE_COUNT = 3;
 
-    // 消滅済み粒子の整理条件
-    const COMPACT_MIN_DEAD = 65536;
-    const COMPACT_DEAD_RATIO = 0.15;
-    const COMPACT_INTERVAL = 2.0;
+    // 初期バッチ情報確保数
+    const INITIAL_BATCH_SLOTS = 16384;
+
+    // ========================================
+    // フレーム時間安定化設定
+    // ========================================
+
+    const FRAME_SMOOTHING_ENABLED = true;
+
+    // フレーム時間の中央値を求めるサンプル数
+    const FRAME_HISTORY_SIZE = 9;
+
+    // 通常フレーム時間に対する最大倍率
+    const FRAME_SPIKE_RATIO = 1.35;
+
+    // 1フレームあたりの最大進行時間
+    const MAX_VISUAL_STEP = 1 / 30;
+
+    // この秒数以上停止した場合は
+    // 停止期間の時間経過を無視する
+    const PAUSE_GAP = 0.25;
+
+    // ========================================
+    // パフォーマンス診断
+    // ========================================
+
+    const DEBUG_PERFORMANCE = false;
+    const DEBUG_INTERVAL = 2;
 
     // ========================================
     // パラメータ検証
@@ -155,16 +178,26 @@ export function createVisualizer(mount) {
 
         MAX_PIXEL_RATIO <= 0 ||
 
+        !Number.isSafeInteger(PAGE_PARTICLES) ||
+        PAGE_PARTICLES < 1 ||
+
         INITIAL_ESTIMATED_FPS <= 0 ||
         INITIAL_MIN_CAPACITY < 1 ||
         INITIAL_MAX_CAPACITY < INITIAL_MIN_CAPACITY ||
 
-        PARTICLE_BUFFER_GROWTH <= 1 ||
+        !Number.isSafeInteger(BATCH_TEXTURE_COUNT) ||
+        BATCH_TEXTURE_COUNT < 2 ||
 
-        COMPACT_MIN_DEAD < 1 ||
-        COMPACT_DEAD_RATIO <= 0 ||
-        COMPACT_DEAD_RATIO > 1 ||
-        COMPACT_INTERVAL < 0
+        INITIAL_BATCH_SLOTS < 1 ||
+
+        !Number.isSafeInteger(FRAME_HISTORY_SIZE) ||
+        FRAME_HISTORY_SIZE < 1 ||
+
+        FRAME_SPIKE_RATIO < 1 ||
+        MAX_VISUAL_STEP <= 0 ||
+        PAUSE_GAP <= MAX_VISUAL_STEP ||
+
+        DEBUG_INTERVAL <= 0
     ) {
         throw new Error("Invalid visualizer parameter.");
     }
@@ -218,10 +251,10 @@ export function createVisualizer(mount) {
         -Math.LN2 /
         Math.max(NORMAL_COLOR_HALF_LIFE, 0.0001);
 
-    const curveFactor = curve =>
-        curve < 0.0001
+    const curveFactor = c =>
+        c < 0.0001
             ? 1
-            : 1 / (-Math.expm1(-curve));
+            : 1 / (-Math.expm1(-c));
 
     const normalCurveFactor =
         curveFactor(NORMAL_SIZE_CURVE);
@@ -303,8 +336,7 @@ export function createVisualizer(mount) {
     // 重力点マーカーレイヤー
     // ========================================
 
-    const markerLayer =
-        document.createElement("div");
+    const markerLayer = document.createElement("div");
 
     Object.assign(markerLayer.style, {
         position: "absolute",
@@ -315,77 +347,75 @@ export function createVisualizer(mount) {
 
     mount.appendChild(markerLayer);
 
-    let width = Math.max(
-        1,
-        mount.getBoundingClientRect().width
-    );
+    const bounds = mount.getBoundingClientRect();
 
-    let height = Math.max(
-        1,
-        mount.getBoundingClientRect().height
-    );
-
+    let width = Math.max(1, bounds.width);
+    let height = Math.max(1, bounds.height);
     let dpr = 1;
 
     // ========================================
-    // バッチデータ用テクスチャ
+    // バッチテクスチャ
     //
-    // 同じフレームに生成された粒子は
-    // 色・サイズ・透明度・減衰係数を共有する
-    //
-    // 1バッチにつきRGBA32Fを2テクセル使用
+    // 同一テクスチャへの連続書き込みによる
+    // GPU待ち時間を軽減するため、
+    // 複数のテクスチャを交互に使用する
     // ========================================
 
     const textureLimit =
         gl.getParameter(gl.MAX_TEXTURE_SIZE);
 
-    const textureWidth =
-        Math.min(1024, textureLimit);
-
-    const slotsPerRow =
-        Math.floor(textureWidth / 2);
+    const slotsPerRow = Math.floor(
+        Math.min(1024, textureLimit) / 2
+    );
 
     const rowWidth = slotsPerRow * 2;
 
-    const batchTexture = gl.createTexture();
-
-    gl.activeTexture(gl.TEXTURE0);
-
-    gl.bindTexture(
-        gl.TEXTURE_2D,
-        batchTexture
-    );
-
-    gl.texParameteri(
-        gl.TEXTURE_2D,
-        gl.TEXTURE_MIN_FILTER,
-        gl.NEAREST
-    );
-
-    gl.texParameteri(
-        gl.TEXTURE_2D,
-        gl.TEXTURE_MAG_FILTER,
-        gl.NEAREST
-    );
-
-    gl.texParameteri(
-        gl.TEXTURE_2D,
-        gl.TEXTURE_WRAP_S,
-        gl.CLAMP_TO_EDGE
-    );
-
-    gl.texParameteri(
-        gl.TEXTURE_2D,
-        gl.TEXTURE_WRAP_T,
-        gl.CLAMP_TO_EDGE
-    );
+    const batchTextures = [];
 
     let textureRows = 0;
+    let textureIndex = -1;
+
     let batchPixels = new Float32Array(0);
 
     let nextSlot = 0;
 
-    const freeSlots = [];
+    // バッチ管理オブジェクトを再利用
+    const recycledBatches = [];
+
+    gl.activeTexture(gl.TEXTURE0);
+
+    for (let i = 0; i < BATCH_TEXTURE_COUNT; i++) {
+
+        const tex = gl.createTexture();
+
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+
+        gl.texParameteri(
+            gl.TEXTURE_2D,
+            gl.TEXTURE_MIN_FILTER,
+            gl.NEAREST
+        );
+
+        gl.texParameteri(
+            gl.TEXTURE_2D,
+            gl.TEXTURE_MAG_FILTER,
+            gl.NEAREST
+        );
+
+        gl.texParameteri(
+            gl.TEXTURE_2D,
+            gl.TEXTURE_WRAP_S,
+            gl.CLAMP_TO_EDGE
+        );
+
+        gl.texParameteri(
+            gl.TEXTURE_2D,
+            gl.TEXTURE_WRAP_T,
+            gl.CLAMP_TO_EDGE
+        );
+
+        batchTextures.push(tex);
+    }
 
     function ensureTexture(rows) {
 
@@ -403,8 +433,8 @@ export function createVisualizer(mount) {
             textureLimit,
             Math.max(
                 rows,
-                16,
-                textureRows * 2
+                textureRows * 2,
+                1
             )
         );
 
@@ -412,36 +442,45 @@ export function createVisualizer(mount) {
             rowWidth * textureRows * 4
         );
 
-        gl.activeTexture(gl.TEXTURE0);
+        for (const tex of batchTextures) {
 
-        gl.bindTexture(
-            gl.TEXTURE_2D,
-            batchTexture
-        );
+            gl.bindTexture(
+                gl.TEXTURE_2D,
+                tex
+            );
 
-        gl.texImage2D(
-            gl.TEXTURE_2D,
-            0,
-            gl.RGBA32F,
-            rowWidth,
-            textureRows,
-            0,
-            gl.RGBA,
-            gl.FLOAT,
-            null
-        );
+            gl.texImage2D(
+                gl.TEXTURE_2D,
+                0,
+                gl.RGBA32F,
+                rowWidth,
+                textureRows,
+                0,
+                gl.RGBA,
+                gl.FLOAT,
+                null
+            );
+        }
     }
+
+    ensureTexture(
+        Math.min(
+            textureLimit,
+            Math.ceil(
+                INITIAL_BATCH_SLOTS /
+                slotsPerRow
+            )
+        )
+    );
 
     // ========================================
     // Vertex Shader
     //
     // 重力点なし：
-    // 累積減衰係数から位置を計算して描画
-    // GPUバッファへの状態書き込みなし
+    // 累積移動量から位置を計算
     //
     // 重力点あり：
-    // 物理演算と描画を同時に実行
-    // Transform Feedbackで状態を保存
+    // 物理演算と描画を統合
     // ========================================
 
     function vertexSource(integrate) {
@@ -454,8 +493,8 @@ precision highp float;
 precision highp int;
 precision highp sampler2D;
 
-layout(location = 0) in vec4 aState;
-layout(location = 1) in uint aBatch;
+layout(location=0) in vec4 aState;
+layout(location=1) in uint aBatch;
 
 uniform sampler2D uBatchData;
 
@@ -498,10 +537,10 @@ void main() {
         id / ${slotsPerRow}
     );
 
-    // motion.x = 累積移動係数
-    // motion.y = 累積速度減衰係数
+    // motion.x = 累積移動量
+    // motion.y = 累積速度減衰
     // motion.z = 粒子の直径
-    // motion.w = 今回の速度減衰係数
+    // motion.w = 現在の速度減衰係数
 
     vec4 motion = texelFetch(
         uBatchData,
@@ -515,7 +554,7 @@ void main() {
 
 #endif
 
-    // 消滅済み粒子を除外
+    // 消滅済み粒子は処理を省略
 
     if (motion.y < 0.0) {
 
@@ -523,9 +562,6 @@ void main() {
 
         return;
     }
-
-    // 重力点がなかった期間の移動を
-    // 累積係数から一括で算出
 
     vec2 pos =
         aState.xy +
@@ -536,8 +572,8 @@ void main() {
     vec2 vel =
         aState.zw * motion.y;
 
-    // 新規生成された粒子には
-    // 生成フレームの物理演算を適用しない
+    // 新規粒子には生成フレームの
+    // 重力演算を適用しない
 
     if (motion.w >= 0.0) {
 
@@ -560,7 +596,7 @@ void main() {
             float d2 =
                 dot(delta, delta);
 
-            // 重力範囲外は平方根計算を省略
+            // 重力範囲外の平方根計算を省略
 
             if (d2 >= radius * radius) {
                 continue;
@@ -591,14 +627,12 @@ void main() {
         pos += vel * uDt;
     }
 
-    // 描画と同時に更新後の状態を保存
-
     nextState = vec4(pos, vel);
 
 #endif
 
-    // 画面外の粒子は描画演算を省略
-    // 重力による物理演算は維持
+    // 画面外の粒子は描画処理を省略
+    // 物理演算は維持する
 
     if (
         motion.z <= 0.0 ||
@@ -622,9 +656,6 @@ void main() {
 
         return;
     }
-
-    // 色・透明度は同時生成粒子で共有
-    // シェーダー内でpowやexpを計算しない
 
     vColor = texelFetch(
         uBatchData,
@@ -656,8 +687,6 @@ void main() {
 
     // ========================================
     // Fragment Shader
-    //
-    // 円形の判定と色の出力のみ
     // ========================================
 
     const fragmentSource = `#version 300 es
@@ -688,11 +717,9 @@ void main() {
 
     function compile(type, source) {
 
-        const shader =
-            gl.createShader(type);
+        const shader = gl.createShader(type);
 
         gl.shaderSource(shader, source);
-
         gl.compileShader(shader);
 
         if (
@@ -727,11 +754,9 @@ void main() {
             fragmentSource
         );
 
-        const program =
-            gl.createProgram();
+        const program = gl.createProgram();
 
         gl.attachShader(program, vs);
-
         gl.attachShader(program, fs);
 
         if (integrate) {
@@ -746,7 +771,6 @@ void main() {
         gl.linkProgram(program);
 
         gl.deleteShader(vs);
-
         gl.deleteShader(fs);
 
         if (
@@ -767,10 +791,7 @@ void main() {
         }
 
         const uniform = name =>
-            gl.getUniformLocation(
-                program,
-                name
-            );
+            gl.getUniformLocation(program, name);
 
         gl.useProgram(program);
 
@@ -780,35 +801,18 @@ void main() {
         );
 
         return {
-
             program,
-
-            resolution:
-                uniform("uResolution"),
-
-            margin:
-                uniform("uMargin"),
-
-            gravity:
-                uniform("uGravity[0]"),
-
-            count:
-                uniform("uGravityCount"),
-
-            dt:
-                uniform("uDt")
+            resolution: uniform("uResolution"),
+            margin: uniform("uMargin"),
+            gravity: uniform("uGravity[0]"),
+            count: uniform("uGravityCount"),
+            dt: uniform("uDt")
         };
     }
 
-    // 重力点がない場合の専用プログラム
+    const freeProgram = makeProgram(false);
 
-    const freeProgram =
-        makeProgram(false);
-
-    // 重力点がある場合の統合プログラム
-
-    const gravityProgram =
-        makeProgram(true);
+    const gravityProgram = makeProgram(true);
 
     // ========================================
     // 固定描画設定
@@ -828,68 +832,60 @@ void main() {
         gl.ONE_MINUS_SRC_ALPHA
     );
 
-    gl.disable(
-        gl.RASTERIZER_DISCARD
-    );
+    gl.disable(gl.RASTERIZER_DISCARD);
+
+    const feedback =
+        gl.createTransformFeedback();
 
     // ========================================
-    // GPUパーティクルバッファ
+    // 固定サイズGPUページ
     //
-    // State:
-    // x, y, velocityX, velocityY
-    // 16 bytes
+    // 従来の巨大なリングバッファを廃止し、
+    // 固定サイズの複数バッファに分割する
     //
-    // Batch ID:
-    // 4 bytes
+    // バッファ拡張時に全粒子をコピーしない
     // ========================================
+
+    const PAGE_SIZE = Math.min(
+        PAGE_PARTICLES,
+        MAX_PARTICLES
+    );
 
     const STATE_BYTES = 16;
     const ID_BYTES = 4;
 
-    // 画面幅、通常粒子の寿命、想定FPSから
-    // 初期バッファ容量を計算する
+    const activePages = [];
+    const freePages = [];
+    const allPages = [];
 
-    let capacity = Math.min(
+    let current = 0;
+    let serial = 0;
+    let liveCount = 0;
+    let frameNumber = 0;
 
-        MAX_PARTICLES,
+    let stagingState = new Float32Array(0);
+    let stagingIds = new Uint32Array(0);
 
-        INITIAL_MAX_CAPACITY,
+    let pageAllocations = 0;
+    let drawCalls = 0;
+    let submittedParticles = 0;
 
-        Math.max(
-
-            INITIAL_MIN_CAPACITY,
-
-            Math.ceil(
-
-                Math.ceil(
-                    width / PARTICLE_SPACING
-                ) *
-
-                INITIAL_ESTIMATED_FPS *
-
-                normalLife *
-
-                1.1
-            )
-        )
-    );
+    // ========================================
+    // GPUバッファ生成
+    // ========================================
 
     function makeBuffer(size, usage) {
 
-        const buffer =
-            gl.createBuffer();
+        const b = gl.createBuffer();
 
-        if (!buffer) {
+        if (!b) {
 
             throw new Error(
                 "GPU buffer allocation failed."
             );
         }
 
-        gl.bindBuffer(
-            gl.ARRAY_BUFFER,
-            buffer
-        );
+        gl.bindBuffer(gl.ARRAY_BUFFER, b);
 
         gl.bufferData(
             gl.ARRAY_BUFFER,
@@ -902,59 +898,22 @@ void main() {
             null
         );
 
-        const err = gl.getError();
-
-        if (err !== gl.NO_ERROR) {
-
-            gl.deleteBuffer(buffer);
-
-            throw new Error(
-                `GPU buffer allocation failed: ${err}`
-            );
-        }
-
-        return buffer;
+        return b;
     }
 
-    // 最初は状態バッファを1つだけ確保
-    // 重力演算などが必要になったときに
-    // 2つ目を確保する
-
-    let states = [
-
-        makeBuffer(
-            capacity * STATE_BYTES,
-            gl.DYNAMIC_COPY
-        ),
-
-        null
-    ];
-
-    let ids = makeBuffer(
-        capacity * ID_BYTES,
-        gl.DYNAMIC_DRAW
-    );
-
-    let scratchIds = null;
-
-    let current = 0;
-
-    let vaos = [null, null];
-
     // ========================================
-    // VAO
+    // VAO生成
     // ========================================
 
-    function makeVAO(buffer) {
+    function makeVAO(state, ids) {
 
-        const vao =
-            gl.createVertexArray();
+        const vao = gl.createVertexArray();
 
         gl.bindVertexArray(vao);
 
         gl.bindBuffer(
             gl.ARRAY_BUFFER,
-            buffer
+            state
         );
 
         gl.enableVertexAttribArray(0);
@@ -993,527 +952,391 @@ void main() {
         return vao;
     }
 
-    function rebuildVAOs() {
+    // ========================================
+    // GPUページ生成
+    // ========================================
 
-        for (const vao of vaos) {
+    function allocatePage() {
 
-            if (vao) {
-                gl.deleteVertexArray(vao);
-            }
-        }
+        const states = [
 
-        vaos = states.map(
-            buffer =>
-                buffer
-                    ? makeVAO(buffer)
-                    : null
-        );
-    }
-
-    function ensureAlternate() {
-
-        const target = 1 - current;
-
-        if (!states[target]) {
-
-            states[target] = makeBuffer(
-                capacity * STATE_BYTES,
+            makeBuffer(
+                PAGE_SIZE * STATE_BYTES,
                 gl.DYNAMIC_COPY
-            );
+            ),
 
-            vaos[target] =
-                makeVAO(states[target]);
-        }
+            makeBuffer(
+                PAGE_SIZE * STATE_BYTES,
+                gl.DYNAMIC_COPY
+            )
+        ];
 
-        return target;
+        const ids = makeBuffer(
+            PAGE_SIZE * ID_BYTES,
+            gl.DYNAMIC_DRAW
+        );
+
+        const page = {
+            states,
+            ids,
+
+            vaos: [
+                makeVAO(states[0], ids),
+                makeVAO(states[1], ids)
+            ],
+
+            batches: [],
+            head: 0,
+            end: 0
+        };
+
+        allPages.push(page);
+
+        pageAllocations++;
+
+        return page;
     }
 
-    rebuildVAOs();
-
-    const feedback =
-        gl.createTransformFeedback();
-
     // ========================================
-    // パーティクル管理
-    //
-    // 同一フレームで生成された粒子を
-    // バッチ単位で管理する
+    // 初期ページの事前確保
     // ========================================
 
-    const batches = [];
+    const initialTarget = Math.min(
 
-    let liveCount = 0;
+        MAX_PARTICLES,
 
-    let serial = 0;
+        INITIAL_MAX_CAPACITY,
 
-    let writeIndex = 0;
+        Math.max(
 
-    let lastCompact = -Infinity;
+            INITIAL_MIN_CAPACITY,
 
-    let stagingState =
-        new Float32Array(0);
+            Math.ceil(
 
-    let stagingIds =
-        new Uint32Array(0);
+                Math.ceil(
+                    width / PARTICLE_SPACING
+                ) *
 
-    // ========================================
-    // バッチIDの再利用
-    // ========================================
+                INITIAL_ESTIMATED_FPS *
 
-    function releaseSlot(batch) {
+                normalLife *
 
-        freeSlots.push(
-            batch.slot
+                1.1
+            )
+        )
+    );
+
+    for (
+        let i = 0;
+        i < Math.ceil(initialTarget / PAGE_SIZE);
+        i++
+    ) {
+
+        freePages.push(
+            allocatePage()
         );
     }
 
-    function refreshTail() {
+    // ========================================
+    // GPUページの取得・再利用
+    // ========================================
 
-        const last =
-            batches[batches.length - 1];
+    function acquirePage() {
 
-        writeIndex = last
+        const page =
+            freePages.pop() ||
+            allocatePage();
 
-            ? (
-                last.start +
-                last.count
-            ) % capacity
+        activePages.push(page);
 
-            : 0;
+        return page;
     }
 
-    function usedCount() {
+    function recyclePage(page) {
 
-        if (!batches.length) {
-            return 0;
-        }
+        page.batches.length = 0;
 
-        return (
+        page.head = 0;
+        page.end = 0;
 
-            writeIndex -
-            batches[0].start +
-            capacity
-
-        ) % capacity || capacity;
+        freePages.push(page);
     }
 
     // ========================================
-    // バッファの前後にある消滅済み粒子を除去
+    // バッチ管理オブジェクトの再利用
     // ========================================
 
-    function pruneEnds() {
+    function releaseBatch(b) {
 
-        let n = 0;
+        recycledBatches.push(b);
+    }
 
-        while (
-            n < batches.length &&
-            batches[n].dead
+    function acquireBatch() {
+
+        if (recycledBatches.length) {
+
+            return recycledBatches.pop();
+        }
+
+        if (
+            nextSlot >=
+            slotsPerRow * textureLimit
         ) {
 
-            releaseSlot(
-                batches[n++]
+            throw new Error(
+                "Batch slot limit exceeded."
             );
         }
 
-        if (n) {
-
-            batches.splice(0, n);
-        }
-
-        while (
-            batches.length &&
-            batches[batches.length - 1].dead
-        ) {
-
-            releaseSlot(
-                batches.pop()
-            );
-        }
-
-        refreshTail();
+        return {
+            slot: nextSlot++
+        };
     }
 
     // ========================================
     // 消滅済み粒子の管理
-    // ========================================
-
-    function expireParticles(now) {
-
-        for (const b of batches) {
-
-            if (
-                !b.dead &&
-                b.expiry <= now
-            ) {
-
-                b.dead = true;
-
-                liveCount -= b.count;
-            }
-        }
-
-        pruneEnds();
-    }
-
-    // ========================================
-    // 最大粒子数制限
     //
-    // 元の生成順と上書きルールを維持
+    // GPUバッファの再配置やコピーは行わない
     // ========================================
 
-    function trimLogicalCapacity(count) {
+    function expireParticles(now, newCount) {
 
         const cutoff =
             serial +
-            count -
+            newCount -
             MAX_PARTICLES;
-
-        let n = 0;
-
-        while (n < batches.length) {
-
-            const b = batches[n];
-
-            const drop = Math.min(
-
-                b.count,
-
-                Math.max(
-                    0,
-                    cutoff - b.serial
-                )
-            );
-
-            if (!drop) {
-                break;
-            }
-
-            if (!b.dead) {
-
-                liveCount -= drop;
-            }
-
-            if (drop === b.count) {
-
-                releaseSlot(b);
-
-                n++;
-
-            } else {
-
-                b.start = (
-                    b.start + drop
-                ) % capacity;
-
-                b.serial += drop;
-
-                b.count -= drop;
-
-                break;
-            }
-        }
-
-        if (n) {
-
-            batches.splice(0, n);
-        }
-
-        pruneEnds();
-    }
-
-    // ========================================
-    // GPUバッファ整理・拡張
-    //
-    // 生存粒子を生成順に詰め直す
-    // CPUへの読み戻しは行わない
-    // ========================================
-
-    function compact(newCapacity, now) {
-
-        const oldCapacity = capacity;
-
-        const growing =
-            newCapacity !== oldCapacity;
-
-        const oldStates = states;
-
-        const oldIds = ids;
-
-        const oldScratch = scratchIds;
-
-        const source =
-            states[current];
-
-        let target;
-
-        let targetIds;
-
-        if (growing) {
-
-            target = makeBuffer(
-                newCapacity * STATE_BYTES,
-                gl.DYNAMIC_COPY
-            );
-
-            targetIds = makeBuffer(
-                newCapacity * ID_BYTES,
-                gl.DYNAMIC_DRAW
-            );
-
-            states = [
-                target,
-                null
-            ];
-
-            current = 0;
-
-            scratchIds = null;
-
-        } else {
-
-            current =
-                ensureAlternate();
-
-            target =
-                states[current];
-
-            targetIds =
-                scratchIds ||
-
-                makeBuffer(
-                    capacity * ID_BYTES,
-                    gl.DYNAMIC_COPY
-                );
-
-            scratchIds = oldIds;
-        }
-
-        const ranges = [];
-
-        let dest = 0;
 
         let kept = 0;
 
-        // 連続したGPUコピー範囲を結合
+        for (
+            let i = 0;
+            i < activePages.length;
+            i++
+        ) {
 
-        function addRange(src, count) {
+            const p = activePages[i];
 
-            if (!count) {
-                return;
-            }
+            const list = p.batches;
 
-            const prev =
-                ranges[ranges.length - 1];
-
-            if (
-                prev &&
-                prev.src + prev.count === src
+            for (
+                let j = p.head;
+                j < list.length;
+                j++
             ) {
 
-                prev.count += count;
+                const b = list[j];
 
-            } else {
+                // 寿命による消滅
 
-                ranges.push({
-                    src,
-                    dst: dest,
-                    count
-                });
+                if (
+                    !b.dead &&
+                    b.expiry <= now
+                ) {
+
+                    b.dead = true;
+
+                    liveCount -= b.count;
+                }
+
+                // 最大粒子数を超えた場合は
+                // 古い粒子から除外
+
+                const drop = Math.min(
+
+                    b.count,
+
+                    Math.max(
+                        0,
+                        cutoff - b.serial
+                    )
+                );
+
+                if (drop > 0) {
+
+                    if (!b.dead) {
+
+                        liveCount -= drop;
+                    }
+
+                    b.start += drop;
+                    b.serial += drop;
+                    b.count -= drop;
+
+                    if (!b.count) {
+
+                        b.dead = true;
+                    }
+                }
             }
 
-            dest += count;
-        }
+            // ページ先頭の消滅済みバッチを除外
 
-        for (const b of batches) {
+            while (
+                p.head < list.length &&
+                list[p.head].dead
+            ) {
 
-            if (b.dead) {
+                releaseBatch(
+                    list[p.head]
+                );
 
-                releaseSlot(b);
+                list[p.head++] = null;
+            }
+
+            // ページ末尾の消滅済みバッチを除外
+
+            while (
+                list.length > p.head &&
+                list[list.length - 1].dead
+            ) {
+
+                releaseBatch(
+                    list.pop()
+                );
+            }
+
+            // 生存粒子が存在しないページは再利用
+
+            if (p.head === list.length) {
+
+                recyclePage(p);
 
                 continue;
             }
 
-            const start = b.start;
+            const last =
+                list[list.length - 1];
 
-            const first = Math.min(
-                b.count,
-                oldCapacity - start
-            );
+            p.end =
+                last.start + last.count;
 
-            b.start = dest;
-
-            addRange(
-                start,
-                first
-            );
-
-            addRange(
-                0,
-                b.count - first
-            );
-
-            batches[kept++] = b;
-        }
-
-        batches.length = kept;
-
-        function copyRanges(src, dst, bytes) {
-
-            if (!ranges.length) {
-                return;
-            }
-
-            gl.bindBuffer(
-                gl.COPY_READ_BUFFER,
-                src
-            );
-
-            gl.bindBuffer(
-                gl.COPY_WRITE_BUFFER,
-                dst
-            );
-
-            for (const r of ranges) {
-
-                gl.copyBufferSubData(
-                    gl.COPY_READ_BUFFER,
-                    gl.COPY_WRITE_BUFFER,
-                    r.src * bytes,
-                    r.dst * bytes,
-                    r.count * bytes
-                );
-            }
-        }
-
-        copyRanges(
-            source,
-            target,
-            STATE_BYTES
-        );
-
-        copyRanges(
-            oldIds,
-            targetIds,
-            ID_BYTES
-        );
-
-        gl.bindBuffer(
-            gl.COPY_READ_BUFFER,
-            null
-        );
-
-        gl.bindBuffer(
-            gl.COPY_WRITE_BUFFER,
-            null
-        );
-
-        ids = targetIds;
-
-        capacity = newCapacity;
-
-        writeIndex =
-            dest % capacity;
-
-        lastCompact = now;
-
-        rebuildVAOs();
-
-        if (growing) {
-
-            for (const b of oldStates) {
-
-                if (b) {
-
-                    gl.deleteBuffer(b);
-                }
-            }
-
-            gl.deleteBuffer(oldIds);
-
-            if (oldScratch) {
-
-                gl.deleteBuffer(oldScratch);
-            }
-        }
-    }
-
-    // ========================================
-    // バッファ容量の自動管理
-    // ========================================
-
-    function ensureCapacity(count, now) {
-
-        const used = usedCount();
-
-        if (used + count <= capacity) {
-
-            const dead =
-                used - liveCount;
+            // CPU側の小さな管理情報だけを整理
+            // GPUの粒子データはコピーしない
 
             if (
-
-                dead >= COMPACT_MIN_DEAD &&
-
-                dead / used >= COMPACT_DEAD_RATIO &&
-
-                now - lastCompact >= COMPACT_INTERVAL
-
+                p.head >= 1024 &&
+                p.head * 2 >= list.length
             ) {
 
-                compact(
-                    capacity,
-                    now
-                );
+                list.copyWithin(0, p.head);
+
+                list.length -= p.head;
+
+                p.head = 0;
             }
 
-            return;
+            activePages[kept++] = p;
         }
 
-        const need =
-            liveCount + count;
-
-        const next =
-
-            need <= capacity
-
-                ? capacity
-
-                : Math.min(
-
-                    MAX_PARTICLES,
-
-                    Math.max(
-
-                        need,
-
-                        Math.ceil(
-                            capacity *
-                            PARTICLE_BUFFER_GROWTH
-                        )
-                    )
-                );
-
-        compact(
-            next,
-            now
-        );
+        activePages.length = kept;
     }
 
     // ========================================
-    // 時間管理
+    // フレーム時間管理
+    //
+    // 実時間と映像内時間を分離する
+    //
+    // 直近のフレーム時間の中央値を求め、
+    // 突発的に長いフレームの影響を抑える
     // ========================================
 
-    const startTime =
-        performance.now();
+    let previousWall = performance.now();
 
-    const getTime = () =>
-        (
-            performance.now() -
-            startTime
-        ) / 1000;
+    let visualTime = 0;
 
-    let previousTime =
-        getTime();
+    let historyCount = 0;
+    let historyIndex = 0;
+
+    const history = new Float64Array(
+        FRAME_HISTORY_SIZE
+    );
+
+    const sorted = new Float64Array(
+        FRAME_HISTORY_SIZE
+    );
+
+    function frameStep(raw) {
+
+        if (raw <= 0) {
+
+            return 0;
+        }
+
+        // タブ切り替えなどで長時間停止した場合
+        // 停止期間を一気に進めない
+
+        if (raw > PAUSE_GAP) {
+
+            historyCount = 0;
+            historyIndex = 0;
+
+            return 0;
+        }
+
+        if (!FRAME_SMOOTHING_ENABLED) {
+
+            return Math.min(
+                raw,
+                MAX_VISUAL_STEP
+            );
+        }
+
+        // 直近のフレーム時間を記録
+
+        history[historyIndex] = raw;
+
+        historyIndex = (
+            historyIndex + 1
+        ) % FRAME_HISTORY_SIZE;
+
+        historyCount = Math.min(
+            historyCount + 1,
+            FRAME_HISTORY_SIZE
+        );
+
+        // 一時配列を新規生成せず
+        // 挿入ソートで中央値を計算
+
+        for (
+            let i = 0;
+            i < historyCount;
+            i++
+        ) {
+
+            const v = history[i];
+
+            let j = i - 1;
+
+            while (
+                j >= 0 &&
+                sorted[j] > v
+            ) {
+
+                sorted[j + 1] = sorted[j];
+
+                j--;
+            }
+
+            sorted[j + 1] = v;
+        }
+
+        const typical =
+            sorted[
+                Math.floor(historyCount / 2)
+            ];
+
+        // 一時的なフレーム詰まりによって
+        // 移動量が極端に増えないよう制限
+
+        return Math.min(
+
+            raw,
+
+            typical * FRAME_SPIKE_RATIO,
+
+            MAX_VISUAL_STEP
+        );
+    }
 
     let previousAttack = false;
 
@@ -1537,41 +1360,35 @@ void main() {
             return;
         }
 
-        const modulation = (
+        const mod = (
 
             Math.sin(
 
                 2 *
-
                 Math.PI *
-
                 COLOR_LFO_FREQ_DRIFT *
-
                 now
 
             ) + 1
 
         ) * 0.5;
 
-        const frequency =
+        const freq =
 
             COLOR_LFO_FREQ_MIN +
 
             (
                 COLOR_LFO_FREQ_MAX -
                 COLOR_LFO_FREQ_MIN
-            ) * modulation;
+            ) * mod;
 
         colorLfoPhase = (
 
             colorLfoPhase +
 
             2 *
-
             Math.PI *
-
-            frequency *
-
+            freq *
             dt
 
         ) % (2 * Math.PI);
@@ -1589,10 +1406,9 @@ void main() {
 
     const gravityPoints = [];
 
-    const gravityData =
-        new Float32Array(
-            GRAVITY_MAX_POINTS * 4
-        );
+    const gravityData = new Float32Array(
+        GRAVITY_MAX_POINTS * 4
+    );
 
     // ========================================
     // 音量による重力強度の変化
@@ -1601,11 +1417,8 @@ void main() {
     function volumeFactor(waveform) {
 
         if (
-
             GRAVITY_VOLUME_INFLUENCE === 0 ||
-
             !waveform?.length
-
         ) {
 
             return 1;
@@ -1654,11 +1467,14 @@ void main() {
     function spawnGravity(now, waveform) {
 
         if (!GRAVITY_ENABLED) {
+
             return;
         }
 
         const stationary =
+
             Math.random() <
+
             GRAVITY_STATIONARY_PROBABILITY;
 
         const axisX =
@@ -1678,18 +1494,13 @@ void main() {
                 GRAVITY_SPEED_MAX
             );
 
-        const volume =
-            volumeFactor(waveform);
-
         const strength = randomBetween(
 
             GRAVITY_STRENGTH_MIN,
 
             GRAVITY_STRENGTH_MAX
 
-        ) * volume;
-
-        // 上限を超えたら最古の重力点を削除
+        ) * volumeFactor(waveform);
 
         if (
             gravityPoints.length >=
@@ -1710,19 +1521,12 @@ void main() {
                 document.createElement("div");
 
             Object.assign(marker.style, {
-
                 position: "absolute",
-
                 width: `${GRAVITY_MARKER_SIZE}px`,
-
                 height: `${GRAVITY_MARKER_SIZE}px`,
-
                 borderRadius: "50%",
-
                 background: GRAVITY_MARKER_COLOR,
-
                 transform: "translate(-50%, -50%)",
-
                 pointerEvents: "none"
             });
 
@@ -1814,23 +1618,25 @@ void main() {
 
             ) * height;
 
-            const i = count * 4;
+            const j = count * 4;
 
-            gravityData[i] = x;
+            gravityData[j] = x;
 
-            gravityData[i + 1] = y;
+            gravityData[j + 1] = y;
 
-            gravityData[i + 2] =
+            gravityData[j + 2] =
                 p.radius / 100 * base;
 
-            gravityData[i + 3] =
+            gravityData[j + 3] =
                 strength / 100 * height;
 
             if (p.marker) {
 
-                p.marker.style.left = `${x}px`;
+                p.marker.style.left =
+                    `${x}px`;
 
-                p.marker.style.top = `${y}px`;
+                p.marker.style.top =
+                    `${y}px`;
 
                 p.marker.style.opacity =
 
@@ -1851,89 +1657,38 @@ void main() {
 
     // ========================================
     // 新規パーティクル生成
+    //
+    // 固定サイズページの末尾に追加する
+    // ページをまたぐ場合は分割する
     // ========================================
 
     function spawnParticles(
         waveform,
         attack,
-        now
+        now,
+        count
     ) {
 
-        if (
-            !waveform ||
-            waveform.length < 2
-        ) {
+        if (!count) {
 
-            ensureCapacity(0, now);
-
-            return null;
+            return;
         }
 
-        const count = Math.min(
-
-            MAX_PARTICLES,
-
-            Math.ceil(
-                width / PARTICLE_SPACING
-            )
-        );
-
-        trimLogicalCapacity(count);
-
-        ensureCapacity(
-            count,
-            now
-        );
-
-        // バッチIDを再利用する
-
-        const slot = freeSlots.length
-
-            ? freeSlots.pop()
-
-            : nextSlot++;
-
-        if (
-            slot >=
-            slotsPerRow * textureLimit
-        ) {
-
-            throw new Error(
-                "Batch slot limit exceeded."
-            );
-        }
-
-        // 一時配列を再利用
-
-        if (
-            stagingState.length <
-            count * 4
-        ) {
+        if (stagingState.length < count * 4) {
 
             stagingState =
                 new Float32Array(count * 4);
         }
 
-        if (
-            stagingIds.length <
-            count
-        ) {
+        if (stagingIds.length < count) {
 
             stagingIds =
                 new Uint32Array(count);
         }
 
-        // 同じフレームで生成された粒子は
-        // すべて同じバッチIDを持つ
+        const cy = height * 0.5;
 
-        stagingIds.fill(
-            slot,
-            0,
-            count
-        );
-
-        const cy =
-            height * 0.5;
+        // 粒子の初期座標・速度を生成
 
         for (
             let i = 0;
@@ -1960,11 +1715,8 @@ void main() {
             );
 
             const sample = clamp(
-
                 waveform[idx] || 0,
-
                 -1,
-
                 1
             );
 
@@ -1976,8 +1728,7 @@ void main() {
             stagingState[j + 1] =
                 cy;
 
-            stagingState[j + 2] =
-                0;
+            stagingState[j + 2] = 0;
 
             stagingState[j + 3] =
 
@@ -1990,149 +1741,118 @@ void main() {
                 60;
         }
 
-        const first = Math.min(
+        let offset = 0;
 
-            count,
+        while (offset < count) {
 
-            capacity - writeIndex
-        );
+            let p =
+                activePages[
+                    activePages.length - 1
+                ];
 
-        const rest =
-            count - first;
+            if (!p || p.end === PAGE_SIZE) {
 
-        // ====================================
-        // 座標・速度データ転送
-        // ====================================
+                p = acquirePage();
+            }
 
-        gl.bindBuffer(
-            gl.ARRAY_BUFFER,
-            states[current]
-        );
+            const n = Math.min(
 
-        gl.bufferSubData(
-            gl.ARRAY_BUFFER,
-            writeIndex * STATE_BYTES,
-            stagingState,
-            0,
-            first * 4
-        );
+                count - offset,
 
-        if (rest) {
-
-            gl.bufferSubData(
-                gl.ARRAY_BUFFER,
-                0,
-                stagingState,
-                first * 4,
-                rest * 4
+                PAGE_SIZE - p.end
             );
-        }
 
-        // ====================================
-        // バッチID転送
-        // ====================================
+            const b = acquireBatch();
 
-        gl.bindBuffer(
-            gl.ARRAY_BUFFER,
-            ids
-        );
+            b.start = p.end;
+            b.count = n;
+            b.serial = serial;
 
-        gl.bufferSubData(
-            gl.ARRAY_BUFFER,
-            writeIndex * ID_BYTES,
-            stagingIds,
-            0,
-            first
-        );
+            b.born = now;
+            b.frame = frameNumber;
 
-        if (rest) {
+            b.attack = attack;
+            b.target = colorLfoValue;
 
-            gl.bufferSubData(
-                gl.ARRAY_BUFFER,
-                0,
-                stagingIds,
-                first,
-                rest
-            );
-        }
-
-        gl.bindBuffer(
-            gl.ARRAY_BUFFER,
-            null
-        );
-
-        // ====================================
-        // バッチ情報
-        // ====================================
-
-        const batch = {
-
-            slot,
-
-            start: writeIndex,
-
-            count,
-
-            serial,
-
-            born: now,
-
-            attack,
-
-            target: colorLfoValue,
-
-            expiry: now + (
+            b.expiry = now + (
 
                 attack
 
                     ? attackLife
 
                     : normalLife
-            ),
+            );
 
-            // 重力点がない期間の累積係数
+            b.distance = 0;
+            b.damping = 1;
+            b.dead = false;
 
-            distance: 0,
+            stagingIds.fill(
+                b.slot,
+                0,
+                n
+            );
 
-            damping: 1,
+            // 座標・速度データ転送
 
-            dead: false
-        };
+            gl.bindBuffer(
+                gl.ARRAY_BUFFER,
+                p.states[current]
+            );
 
-        batches.push(batch);
+            gl.bufferSubData(
+                gl.ARRAY_BUFFER,
+                p.end * STATE_BYTES,
+                stagingState,
+                offset * 4,
+                n * 4
+            );
 
-        serial += count;
+            // バッチID転送
 
-        liveCount += count;
+            gl.bindBuffer(
+                gl.ARRAY_BUFFER,
+                p.ids
+            );
 
-        writeIndex = (
+            gl.bufferSubData(
+                gl.ARRAY_BUFFER,
+                p.end * ID_BYTES,
+                stagingIds,
+                0,
+                n
+            );
 
-            writeIndex + count
+            p.batches.push(b);
 
-        ) % capacity;
+            p.end += n;
 
-        return batch;
+            serial += n;
+
+            liveCount += n;
+
+            offset += n;
+        }
+
+        gl.bindBuffer(
+            gl.ARRAY_BUFFER,
+            null
+        );
     }
 
     // ========================================
-    // バッチ共通データの計算
+    // バッチ共通演算
     //
-    // 同時生成された粒子について
-    // 以下の演算を1回だけ実行する
+    // 同時に生成された粒子の
+    // 色・透明度・サイズなどを共有する
     //
-    // ・透明度
-    // ・サイズ
-    // ・サイズ変化曲線
-    // ・色
-    // ・速度減衰
-    // ・累積移動量
+    // GPU転送先テクスチャを毎フレーム変更
     // ========================================
 
     function prepareBatches(
         now,
         dt,
-        integrate,
-        newborn
+        integrate
     ) {
 
         const rows = Math.max(
@@ -2146,292 +1866,310 @@ void main() {
 
         ensureTexture(rows);
 
-        // 速度減衰係数は1フレーム2回だけ計算
-
         const dn =
             Math.exp(normalRate * dt);
 
         const da =
             Math.exp(attackRate * dt);
 
-        for (const b of batches) {
+        for (const p of activePages) {
 
-            const j =
-                b.slot * 8;
-
-            // 消滅済みバッチ
-
-            if (b.dead) {
-
-                batchPixels[j + 1] = -1;
-
-                continue;
-            }
-
-            const a = b.attack;
-
-            const damping =
-                a ? da : dn;
-
-            // =================================
-            // 重力点が存在しない場合
-            //
-            // 元の離散時間の減衰・移動計算を
-            // バッチ共通の累積係数にまとめる
-            //
-            // GPUバッファの座標・速度は
-            // 毎フレーム更新しない
-            // =================================
-
-            if (
-                !integrate &&
-                b !== newborn
+            for (
+                let i = p.head;
+                i < p.batches.length;
+                i++
             ) {
 
-                b.damping *= damping;
+                const b = p.batches[i];
 
-                b.distance +=
-                    b.damping * dt;
-            }
+                const j = b.slot * 8;
 
-            // =================================
-            // 年齢・透明度
-            // =================================
+                // 消滅済みバッチ
 
-            const age = Math.max(
-                0,
-                now - b.born
-            );
+                if (b.dead) {
 
-            const alpha = (
+                    batchPixels[j + 1] = -1;
 
-                a
+                    continue;
+                }
 
-                    ? ATTACK_INITIAL_ALPHA
+                const a = b.attack;
 
-                    : NORMAL_INITIAL_ALPHA
+                const newborn =
+                    b.frame === frameNumber;
 
-            ) * Math.pow(
+                const damping =
+                    a ? da : dn;
 
-                a
+                // =================================
+                // 重力点が存在しない場合
+                // =================================
 
-                    ? ATTACK_ALPHA_DECAY
+                if (!integrate && !newborn) {
 
-                    : NORMAL_ALPHA_DECAY,
+                    b.damping *= damping;
 
-                age * 60
-            );
+                    b.distance +=
+                        b.damping * dt;
+                }
 
-            // =================================
-            // サイズ計算
-            // =================================
+                // =================================
+                // 透明度
+                // =================================
 
-            const life =
+                const age = Math.max(
+                    0,
+                    now - b.born
+                );
 
-                a
-
-                    ? attackLife
-
-                    : normalLife;
-
-            const startSize =
-
-                a
-
-                    ? ATTACK_INITIAL_SIZE
-
-                    : NORMAL_INITIAL_SIZE;
-
-            const endSize =
-
-                a
-
-                    ? ATTACK_FINAL_SIZE
-
-                    : NORMAL_FINAL_SIZE;
-
-            let size = startSize;
-
-            // サイズが一定なら曲線計算を省略
-
-            if (startSize !== endSize) {
-
-                let p =
-
-                    Number.isFinite(life) &&
-                    life > 0
-
-                        ? clamp(
-                            age / life,
-                            0,
-                            1
-                        )
-
-                        : 0;
-
-                const curve =
+                const alpha = (
 
                     a
 
-                        ? ATTACK_SIZE_CURVE
+                        ? ATTACK_INITIAL_ALPHA
 
-                        : NORMAL_SIZE_CURVE;
+                        : NORMAL_INITIAL_ALPHA
 
-                if (curve >= 0.0001) {
+                ) * Math.pow(
 
-                    p =
+                    a
 
-                        -Math.expm1(-curve * p) *
+                        ? ATTACK_ALPHA_DECAY
 
-                        (
-                            a
+                        : NORMAL_ALPHA_DECAY,
 
-                                ? attackCurveFactor
+                    age * 60
+                );
 
-                                : normalCurveFactor
-                        );
+                // =================================
+                // サイズ
+                // =================================
+
+                const life =
+
+                    a
+
+                        ? attackLife
+
+                        : normalLife;
+
+                const startSize =
+
+                    a
+
+                        ? ATTACK_INITIAL_SIZE
+
+                        : NORMAL_INITIAL_SIZE;
+
+                const endSize =
+
+                    a
+
+                        ? ATTACK_FINAL_SIZE
+
+                        : NORMAL_FINAL_SIZE;
+
+                let size = startSize;
+
+                // サイズが一定の場合は
+                // サイズ変化の計算を省略
+
+                if (startSize !== endSize) {
+
+                    let progress =
+
+                        Number.isFinite(life) &&
+                        life > 0
+
+                            ? clamp(
+                                age / life,
+                                0,
+                                1
+                            )
+
+                            : 0;
+
+                    const curve =
+
+                        a
+
+                            ? ATTACK_SIZE_CURVE
+
+                            : NORMAL_SIZE_CURVE;
+
+                    if (curve >= 0.0001) {
+
+                        progress =
+
+                            -Math.expm1(
+                                -curve * progress
+                            ) *
+
+                            (
+                                a
+
+                                    ? attackCurveFactor
+
+                                    : normalCurveFactor
+                            );
+                    }
+
+                    size +=
+
+                        (endSize - startSize) *
+
+                        progress;
                 }
 
-                size +=
+                const diameter = Math.max(
+                    0,
+                    size * dpr
+                );
 
-                    (endSize - startSize) *
+                // =================================
+                // 色
+                // 通常：赤 → 白 → シアン
+                // アタック：赤固定
+                // =================================
 
-                    p;
-            }
+                const w =
 
-            const diameter = Math.max(
+                    a
 
-                0,
+                        ? 0
 
-                size * dpr
-            );
+                        : (
 
-            // =================================
-            // 色計算
-            //
-            // 通常：赤 → 白 → シアン
-            // アタック：赤固定
-            // =================================
+                            1 -
 
-            const w =
+                            Math.exp(
+                                colorRate * age
+                            )
 
-                a
+                        ) * clamp(
+                            b.target,
+                            0,
+                            1
+                        );
 
-                    ? 0
+                const r =
 
-                    : (
+                    w < 0.5
 
-                        1 -
-                        Math.exp(colorRate * age)
+                        ? 1
 
-                    ) * clamp(
-                        b.target,
-                        0,
-                        1
-                    );
+                        : 2 - 2 * w;
 
-            const r =
+                const gb =
 
-                w < 0.5
+                    w < 0.5
 
-                    ? 1
+                        ? 2 * w
 
-                    : 2 - 2 * w;
+                        : 1;
 
-            const gb =
+                // =================================
+                // テクセル1：移動・サイズ
+                // =================================
 
-                w < 0.5
+                batchPixels[j] =
+                    b.distance;
 
-                    ? 2 * w
+                batchPixels[j + 1] =
+                    b.damping;
 
-                    : 1;
+                batchPixels[j + 2] =
+                    diameter;
 
-            // =================================
-            // 1テクセル目：移動・サイズ
-            // =================================
+                batchPixels[j + 3] =
 
-            batchPixels[j] =
-                b.distance;
+                    integrate && !newborn
 
-            batchPixels[j + 1] =
-                b.damping;
+                        ? damping
 
-            batchPixels[j + 2] =
-                diameter;
+                        : -1;
 
-            batchPixels[j + 3] =
+                // =================================
+                // テクセル2：色・透明度
+                // =================================
 
-                integrate &&
-                b !== newborn
+                batchPixels[j + 4] = r;
 
-                    ? damping
+                batchPixels[j + 5] = gb;
 
-                    : -1;
+                batchPixels[j + 6] = gb;
 
-            // =================================
-            // 2テクセル目：色・透明度
-            // =================================
+                batchPixels[j + 7] =
 
-            batchPixels[j + 4] = r;
+                    alpha > PARTICLE_MIN_ALPHA
 
-            batchPixels[j + 5] = gb;
+                        ? alpha *
 
-            batchPixels[j + 6] = gb;
+                            Math.min(
+                                1,
+                                diameter * diameter
+                            )
 
-            batchPixels[j + 7] =
+                        : 0;
 
-                alpha > PARTICLE_MIN_ALPHA
+                // 重力演算時は状態をGPUに保存するため
+                // 累積係数をリセット
 
-                    ? alpha *
-                        Math.min(
-                            1,
-                            diameter * diameter
-                        )
+                if (integrate) {
 
-                    : 0;
+                    b.distance = 0;
 
-            // 重力演算がある場合は
-            // GPU側で現在位置と速度を保存するため
-            // 累積係数をリセット
-
-            if (integrate) {
-
-                b.distance = 0;
-
-                b.damping = 1;
+                    b.damping = 1;
+                }
             }
         }
 
-        // バッチ共通情報をGPUへ一括転送
+        // ====================================
+        // テクスチャをローテーション
+        // ====================================
+
+        textureIndex = (
+
+            textureIndex + 1
+
+        ) % BATCH_TEXTURE_COUNT;
 
         gl.activeTexture(gl.TEXTURE0);
 
         gl.bindTexture(
+
             gl.TEXTURE_2D,
-            batchTexture
+
+            batchTextures[textureIndex]
         );
 
         gl.texSubImage2D(
+
             gl.TEXTURE_2D,
+
             0,
+
             0,
+
             0,
+
             rowWidth,
+
             rows,
+
             gl.RGBA,
+
             gl.FLOAT,
+
             batchPixels
         );
     }
 
     // ========================================
-    // GPU描画・物理演算
+    // GPU描画
     //
-    // 重力なし：
-    // 描画のみ
-    //
-    // 重力あり：
-    // 物理演算と描画を同時実行
+    // 重力なし：描画のみ
+    // 重力あり：物理演算と描画を統合
     // ========================================
 
     function render(
@@ -2444,9 +2182,11 @@ void main() {
             gl.COLOR_BUFFER_BIT
         );
 
-        const used = usedCount();
+        drawCalls = 0;
+        submittedParticles = 0;
 
-        if (!used) {
+        if (!activePages.length) {
+
             return;
         }
 
@@ -2459,16 +2199,9 @@ void main() {
                 : freeProgram;
 
         const target =
+            1 - current;
 
-            integrate
-
-                ? ensureAlternate()
-
-                : current;
-
-        gl.useProgram(
-            p.program
-        );
+        gl.useProgram(p.program);
 
         if (integrate) {
 
@@ -2483,9 +2216,13 @@ void main() {
             );
 
             gl.uniform4fv(
+
                 p.gravity,
+
                 gravityData,
+
                 0,
+
                 gravityCount * 4
             );
 
@@ -2495,23 +2232,40 @@ void main() {
             );
         }
 
-        gl.bindVertexArray(
-            vaos[current]
-        );
-
         // ====================================
-        // 描画・Transform Feedback統合処理
+        // ページ単位で描画
+        // 生成順・透過合成順を維持
         // ====================================
 
-        function run(start, count) {
+        for (const page of activePages) {
+
+            const start =
+                page.batches[page.head].start;
+
+            const count =
+                page.end - start;
+
+            if (!count) {
+
+                continue;
+            }
+
+            gl.bindVertexArray(
+                page.vaos[current]
+            );
 
             if (integrate) {
 
                 gl.bindBufferRange(
+
                     gl.TRANSFORM_FEEDBACK_BUFFER,
+
                     0,
-                    states[target],
+
+                    page.states[target],
+
                     start * STATE_BYTES,
+
                     count * STATE_BYTES
                 );
 
@@ -2520,12 +2274,12 @@ void main() {
                 );
             }
 
-            // RASTERIZER_DISCARDを使用せず
-            // 物理演算と描画を同時に行う
-
             gl.drawArrays(
+
                 gl.POINTS,
+
                 start,
+
                 count
             );
 
@@ -2533,43 +2287,27 @@ void main() {
 
                 gl.endTransformFeedback();
             }
-        }
 
-        const head =
-            batches[0].start;
+            drawCalls++;
 
-        const first = Math.min(
-
-            used,
-
-            capacity - head
-        );
-
-        // 描画順序を維持
-
-        run(
-            head,
-            first
-        );
-
-        if (used > first) {
-
-            run(
-                0,
-                used - first
-            );
+            submittedParticles += count;
         }
 
         if (integrate) {
 
             gl.bindBufferBase(
+
                 gl.TRANSFORM_FEEDBACK_BUFFER,
+
                 0,
+
                 null
             );
 
             gl.bindTransformFeedback(
+
                 gl.TRANSFORM_FEEDBACK,
+
                 null
             );
 
@@ -2585,17 +2323,17 @@ void main() {
 
     function resize() {
 
-        const bounds =
+        const b =
             mount.getBoundingClientRect();
 
         width = Math.max(
             1,
-            bounds.width
+            b.width
         );
 
         height = Math.max(
             1,
-            bounds.height
+            b.height
         );
 
         dpr = Math.min(
@@ -2618,8 +2356,6 @@ void main() {
 
             Math.round(height * dpr)
         );
-
-        // サイズ変更が必要な場合のみ更新
 
         if (canvas.width !== w) {
 
@@ -2652,17 +2388,12 @@ void main() {
 
         ) + 2;
 
-        // 両方の描画プログラムに
-        // 同じ解像度を設定する
-
         for (const p of [
             freeProgram,
             gravityProgram
         ]) {
 
-            gl.useProgram(
-                p.program
-            );
+            gl.useProgram(p.program);
 
             gl.uniform2f(
                 p.resolution,
@@ -2685,6 +2416,229 @@ void main() {
     resize();
 
     // ========================================
+    // パフォーマンス診断
+    //
+    // DEBUG_PERFORMANCE = true の場合のみ
+    // 診断情報をコンソールに出力する
+    //
+    // 対応GPUでは非同期GPU時間計測も行う
+    // ========================================
+
+    const timerExt =
+
+        DEBUG_PERFORMANCE
+
+            ? gl.getExtension(
+                "EXT_disjoint_timer_query_webgl2"
+            )
+
+            : null;
+
+    let pendingQuery = null;
+
+    let gpuMs = null;
+
+    let reportAt = performance.now();
+
+    let reportFrames = 0;
+
+    let sumFrame = 0;
+    let maxFrame = 0;
+    let sumCPU = 0;
+
+    let slowFrames = 0;
+
+    let lastAllocations =
+        pageAllocations;
+
+    // ========================================
+    // GPU処理時間計測
+    // ========================================
+
+    function beginTimer() {
+
+        if (!timerExt) {
+
+            return false;
+        }
+
+        if (
+            pendingQuery &&
+
+            gl.getQueryParameter(
+                pendingQuery,
+                gl.QUERY_RESULT_AVAILABLE
+            )
+        ) {
+
+            if (
+                !gl.getParameter(
+                    timerExt.GPU_DISJOINT_EXT
+                )
+            ) {
+
+                gpuMs =
+
+                    gl.getQueryParameter(
+                        pendingQuery,
+                        gl.QUERY_RESULT
+                    ) / 1e6;
+
+            } else {
+
+                gpuMs = null;
+            }
+
+            gl.deleteQuery(
+                pendingQuery
+            );
+
+            pendingQuery = null;
+        }
+
+        // 計測負荷を抑えるため
+        // 30フレームにつき1回だけ計測
+
+        if (
+            pendingQuery ||
+            frameNumber % 30 !== 0
+        ) {
+
+            return false;
+        }
+
+        pendingQuery =
+            gl.createQuery();
+
+        if (!pendingQuery) {
+
+            return false;
+        }
+
+        gl.beginQuery(
+            timerExt.TIME_ELAPSED_EXT,
+            pendingQuery
+        );
+
+        return true;
+    }
+
+    // ========================================
+    // 診断結果の出力
+    // ========================================
+
+    function report(raw, cpu) {
+
+        if (!DEBUG_PERFORMANCE) {
+
+            return;
+        }
+
+        reportFrames++;
+
+        sumFrame += raw * 1000;
+
+        maxFrame = Math.max(
+            maxFrame,
+            raw * 1000
+        );
+
+        sumCPU += cpu;
+
+        if (raw > 1 / 30) {
+
+            slowFrames++;
+        }
+
+        const t = performance.now();
+
+        if (
+            t - reportAt <
+            DEBUG_INTERVAL * 1000
+        ) {
+
+            return;
+        }
+
+        console.log(
+            "[Particle Visualizer]",
+            {
+
+                fps: Math.round(
+
+                    1000 *
+                    reportFrames /
+
+                    Math.max(
+                        sumFrame,
+                        0.001
+                    )
+                ),
+
+                averageFrameMs: +(
+                    sumFrame / reportFrames
+                ).toFixed(2),
+
+                maxFrameMs:
+                    +maxFrame.toFixed(2),
+
+                slowFrames,
+
+                averageCPUMs: +(
+                    sumCPU / reportFrames
+                ).toFixed(2),
+
+                gpuDrawMs:
+
+                    gpuMs === null
+
+                        ? null
+
+                        : +gpuMs.toFixed(2),
+
+                liveParticles:
+                    liveCount,
+
+                submittedParticles,
+
+                gravityPoints:
+                    gravityPoints.length,
+
+                drawCalls,
+
+                allocatedPages:
+                    allPages.length,
+
+                newPages:
+
+                    pageAllocations -
+
+                    lastAllocations,
+
+                bufferCopies: 0
+            }
+        );
+
+        reportAt = t;
+
+        reportFrames = 0;
+
+        sumFrame = 0;
+        maxFrame = 0;
+        sumCPU = 0;
+
+        slowFrames = 0;
+
+        lastAllocations =
+            pageAllocations;
+    }
+
+    // 初期化処理の時間を
+    // 最初のフレームに含めない
+
+    previousWall = performance.now();
+
+    // ========================================
     // メインループ
     // ========================================
 
@@ -2693,28 +2647,40 @@ void main() {
         update(audio, dt) {
 
             if (gl.isContextLost()) {
+
                 return;
             }
 
-            const now = getTime();
+            // =================================
+            // フレーム時間の取得
+            // =================================
 
-            const elapsed = Math.max(
+            const wall =
+                performance.now();
+
+            const raw = Math.max(
 
                 0,
 
-                now - previousTime
+                (wall - previousWall) / 1000
             );
 
-            // 元の物理演算ステップを維持
+            previousWall = wall;
 
-            const step = Math.min(
+            frameNumber++;
 
-                elapsed,
+            // =================================
+            // フレーム時間の安定化
+            // =================================
 
-                1 / 30
-            );
+            const step =
+                frameStep(raw);
 
-            previousTime = now;
+            visualTime += step;
+
+            // すべての映像内時間を統一
+
+            const now = visualTime;
 
             // =================================
             // Color LFO
@@ -2722,7 +2688,7 @@ void main() {
 
             updateColorLfo(
                 now,
-                elapsed
+                step
             );
 
             // =================================
@@ -2733,6 +2699,9 @@ void main() {
                 audio?.attackTriggered
             );
 
+            const waveform =
+                audio?.waveform;
+
             if (
                 attack &&
                 !previousAttack
@@ -2740,7 +2709,7 @@ void main() {
 
                 spawnGravity(
                     now,
-                    audio?.waveform
+                    waveform
                 );
             }
 
@@ -2754,22 +2723,43 @@ void main() {
                 updateGravity(now);
 
             // =================================
+            // 新規生成粒子数
+            // =================================
+
+            const count =
+
+                waveform &&
+                waveform.length >= 2
+
+                    ? Math.min(
+
+                        MAX_PARTICLES,
+
+                        Math.ceil(
+                            width / PARTICLE_SPACING
+                        )
+                    )
+
+                    : 0;
+
+            // =================================
             // 消滅済み粒子の除外
             // =================================
 
-            expireParticles(now);
+            expireParticles(
+                now,
+                count
+            );
 
             // =================================
-            // 新規パーティクル生成
+            // 新規粒子生成
             // =================================
 
-            const newborn = spawnParticles(
-
-                audio?.waveform,
-
+            spawnParticles(
+                waveform,
                 attack,
-
-                now
+                now,
+                count
             );
 
             // =================================
@@ -2783,31 +2773,51 @@ void main() {
                 step > 0;
 
             // =================================
-            // バッチ共通データを準備
+            // バッチ共通データ準備
             // =================================
 
-            if (batches.length) {
+            if (activePages.length) {
 
                 prepareBatches(
                     now,
                     step,
-                    integrate,
-                    newborn
+                    integrate
                 );
             }
 
             // =================================
             // GPU描画
-            //
-            // 必要な場合のみ
-            // 同時に物理演算を実行する
             // =================================
+
+            const timing =
+                beginTimer();
 
             render(
                 gravityCount,
                 step,
                 integrate
             );
+
+            if (timing) {
+
+                gl.endQuery(
+                    timerExt.TIME_ELAPSED_EXT
+                );
+            }
+
+            // =================================
+            // パフォーマンス診断
+            // =================================
+
+            if (DEBUG_PERFORMANCE) {
+
+                report(
+
+                    raw,
+
+                    performance.now() - wall
+                );
+            }
         },
 
         // ====================================
@@ -2818,51 +2828,47 @@ void main() {
 
             observer.disconnect();
 
-            for (
-                const p of gravityPoints
-            ) {
+            for (const p of gravityPoints) {
 
                 p.marker?.remove();
             }
 
             gravityPoints.length = 0;
 
-            batches.length = 0;
+            if (pendingQuery) {
 
-            freeSlots.length = 0;
+                gl.deleteQuery(
+                    pendingQuery
+                );
+            }
 
             gl.deleteTransformFeedback(
                 feedback
             );
 
-            for (const vao of vaos) {
+            // すべてのGPUページを解放
 
-                if (vao) {
+            for (const p of allPages) {
+
+                for (const vao of p.vaos) {
 
                     gl.deleteVertexArray(vao);
                 }
-            }
 
-            for (const b of states) {
-
-                if (b) {
+                for (const b of p.states) {
 
                     gl.deleteBuffer(b);
                 }
+
+                gl.deleteBuffer(p.ids);
             }
 
-            gl.deleteBuffer(ids);
+            // すべてのバッチテクスチャを解放
 
-            if (scratchIds) {
+            for (const t of batchTextures) {
 
-                gl.deleteBuffer(
-                    scratchIds
-                );
+                gl.deleteTexture(t);
             }
-
-            gl.deleteTexture(
-                batchTexture
-            );
 
             gl.deleteProgram(
                 freeProgram.program
@@ -2871,6 +2877,12 @@ void main() {
             gl.deleteProgram(
                 gravityProgram.program
             );
+
+            activePages.length = 0;
+            freePages.length = 0;
+            allPages.length = 0;
+
+            recycledBatches.length = 0;
 
             markerLayer.remove();
 
