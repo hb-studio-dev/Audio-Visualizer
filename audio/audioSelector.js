@@ -42,6 +42,7 @@ export class AudioSelector {
         echoCancellation: false,
         noiseSuppression: false,
         autoGainControl: false,
+        latency: { ideal: 0.01 },
         ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
       },
       video: false,

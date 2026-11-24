@@ -1276,7 +1276,7 @@ void main() {
     // 音量による重力強度の変化
     // ========================================
 
-    function volumeFactor(waveform) {
+    function volumeFactor(waveform, fastVolume) {
 
         if (
             GRAVITY_VOLUME_INFLUENCE === 0 ||
@@ -1285,15 +1285,12 @@ void main() {
             return 1;
         }
 
-        let sum = 0;
-
-        for (let i = 0; i < waveform.length; i++) {
-            sum += waveform[i] * waveform[i];
-        }
+        const rms = Number.isFinite(fastVolume)
+            ? fastVolume
+            : waveformRms(waveform);
 
         const volume = clamp(
-            Math.sqrt(sum / waveform.length) /
-            GRAVITY_VOLUME_REFERENCE,
+            rms / GRAVITY_VOLUME_REFERENCE,
             0,
             1
         );
@@ -1308,17 +1305,23 @@ void main() {
     // Low Attackによる上下左右スライス生成
     // ========================================
 
-    function createAttackShift(waveform) {
-        if (!ATTACK_SHIFT_ENABLED || !waveform?.length) {
-            return null;
-        }
-
-        // 全帯域のRMS音量
+    function waveformRms(waveform) {
         let sum = 0;
         for (let i = 0; i < waveform.length; i++) {
             sum += waveform[i] * waveform[i];
         }
-        const rms = Math.sqrt(sum / waveform.length);
+        return Math.sqrt(sum / waveform.length);
+    }
+
+    function createAttackShift(waveform, fastVolume) {
+        if (!ATTACK_SHIFT_ENABLED || !waveform?.length) {
+            return null;
+        }
+
+        // アタック検出時点の短いRMS窓を優先。旧解析器にも対応。
+        const rms = Number.isFinite(fastVolume)
+            ? fastVolume
+            : waveformRms(waveform);
         if (!Number.isFinite(rms) || rms <= 0) {
             return null;
         }
@@ -1379,7 +1382,7 @@ void main() {
     // 重力点生成
     // ========================================
 
-    function spawnGravity(now, waveform) {
+    function spawnGravity(now, waveform, fastVolume) {
 
         if (!GRAVITY_ENABLED) {
             return;
@@ -1401,7 +1404,7 @@ void main() {
         const strength = randomBetween(
             GRAVITY_STRENGTH_MIN,
             GRAVITY_STRENGTH_MAX
-        ) * volumeFactor(waveform);
+        ) * volumeFactor(waveform, fastVolume);
 
         if (gravityPoints.length >= GRAVITY_MAX_POINTS) {
             gravityPoints.shift()?.marker?.remove();
@@ -2264,9 +2267,9 @@ void main() {
             // 重力点を生成
             // =================================
 
-            if (attack && !previousAttack) {
+            if (attack && (audio?.attackEventMode || !previousAttack)) {
 
-                spawnGravity(now, waveform);
+                spawnGravity(now, waveform, audio?.attackVolume);
             }
 
             // =================================
@@ -2276,9 +2279,9 @@ void main() {
             // 同方向に慣性を加算
             // =================================
 
-            if (lowAttack && !previousLowAttack) {
+            if (lowAttack && (audio?.attackEventMode || !previousLowAttack)) {
 
-                attackShift = createAttackShift(waveform);
+                attackShift = createAttackShift(waveform, audio?.lowAttackVolume);
             }
 
             // アタック状態の保存

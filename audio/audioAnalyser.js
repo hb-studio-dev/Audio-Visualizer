@@ -23,8 +23,13 @@ export const DEVICE_DEFAULT_SETTINGS = Object.freeze({
 });
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
-const rms = (data) =>
-  Math.sqrt(data.reduce((sum, value) => sum + value * value, 0) / data.length);
+const rms = (data, size = data.length) => {
+  let sum = 0;
+  const start = Math.max(0, data.length - size);
+  for (let i = start; i < data.length; i++) sum += data[i] * data[i];
+  return Math.sqrt(sum / (data.length - start));
+};
+const FAST_WINDOWS = [256, 512, 256, 256];
 
 export class AudioAnalyser {
   constructor(settings = {}) {
@@ -33,6 +38,13 @@ export class AudioAnalyser {
     this.sourceNode = null;
     this.gainNode = null;
     this.silentSink = null;
+    this.worklet = null;
+    this.workletEpoch = 0;
+    this.fastLevel = 0;
+    this.pendingDeltas = new Float64Array(4);
+    this.pendingFlags = new Array(4).fill(false);
+    this.pendingVolumes = new Float64Array(4);
+    this.pendingPeak = 0;
     this.nodes = [];
     this.sampleBuffers = [];
     this.previous = { full: 0, low: 0, mid: 0, high: 0 };
@@ -60,7 +72,42 @@ export class AudioAnalyser {
       peak: 0,
       peakTriggered: false,
       waveform: this.waveform,
+      attackEventMode: false,
+      attackVolume: 0,
+      lowAttackVolume: 0,
     };
+  }
+
+  workletThresholds() {
+    const t = this.thresholds;
+    return [t.attack, t.low, t.mid, t.high];
+  }
+
+  clearPending() {
+    this.pendingDeltas.fill(0);
+    this.pendingFlags.fill(false);
+    this.pendingVolumes.fill(0);
+    this.pendingPeak = 0;
+  }
+
+  resetFastAnalysis() {
+    this.fastLevel = 0;
+    this.clearPending();
+    if (this.worklet) {
+      this.worklet.port.postMessage({ type: 'settings', thresholds: this.workletThresholds() });
+      this.worklet.port.postMessage({ type: 'reset', epoch: ++this.workletEpoch });
+    }
+  }
+
+  receiveFastAnalysis(data, worklet) {
+    if (this.worklet !== worklet || data.epoch !== this.workletEpoch) return;
+    this.fastLevel = data.level;
+    for (let i = 0; i < 4; i++) {
+      this.pendingDeltas[i] = Math.max(this.pendingDeltas[i], data.deltas[i]);
+      this.pendingFlags[i] ||= data.flags[i];
+      this.pendingVolumes[i] = Math.max(this.pendingVolumes[i], data.eventVolumes[i]);
+    }
+    this.pendingPeak = Math.max(this.pendingPeak, data.peak);
   }
 
   setSettings(settings = {}) {
@@ -74,6 +121,9 @@ export class AudioAnalyser {
       peak: dbToAmplitude(this.settings.peakThresholdDb),
     };
     if (this.gainNode) this.gainNode.gain.value = this.inputGain;
+    if (this.worklet) this.worklet.port.postMessage({
+      type: 'settings', thresholds: this.workletThresholds(),
+    });
   }
 
   async useStream(stream) {
@@ -86,7 +136,7 @@ export class AudioAnalyser {
     // 切り替えるたびにAudioContextを破棄すると、音の途切れや
     // ブラウザによるオーディオ初期化失敗が起こりやすいので、解析グラフは維持する。
     const isNewContext = !this.ctx;
-    const ctx = this.ctx || new Ctx();
+    const ctx = this.ctx || new Ctx({ latencyHint: "interactive" });
     let graph = null;
     let newSource = null;
     try {
@@ -108,7 +158,8 @@ export class AudioAnalyser {
         midHigh.frequency.value = 4000;
         midLow.connect(midHigh);
         const high = createBand("highpass", 4000);
-        const nodes = [gain, low, midHigh, high].map((node) => {
+        const bands = [gain, low, midHigh, high];
+        const nodes = bands.map((node) => {
           const analyser = ctx.createAnalyser();
           analyser.fftSize = 1024;
           analyser.smoothingTimeConstant = 0;
@@ -120,7 +171,26 @@ export class AudioAnalyser {
         silentSink.gain.value = 0;
         nodes.forEach((node) => node.connect(silentSink));
         silentSink.connect(ctx.destination);
-        graph = { gain, nodes, silentSink };
+        let worklet = null;
+        // Keep the original analyser graph as a compatibility fallback and
+        // keep its full-band 1024-sample waveform for all visualizers.
+        try {
+          if (ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
+            await ctx.audioWorklet.addModule(new URL('./analysisProcessor.js?v=fast-audio-v1', import.meta.url));
+            worklet = new AudioWorkletNode(ctx, 'fast-audio-analysis', {
+              numberOfInputs: 4, numberOfOutputs: 1, outputChannelCount: [1],
+              channelCount: 1, channelCountMode: 'explicit', channelInterpretation: 'speakers',
+              processorOptions: { thresholds: this.workletThresholds() },
+            });
+            bands.forEach((band, i) => band.connect(worklet, 0, i));
+            worklet.connect(silentSink);
+          }
+        } catch (error) {
+          worklet?.disconnect();
+          worklet = null;
+          console.warn('AudioWorklet unavailable; using short-window analyser fallback.', error);
+        }
+        graph = { gain, nodes, silentSink, worklet };
       }
 
       newSource = ctx.createMediaStreamSource(stream);
@@ -139,8 +209,23 @@ export class AudioAnalyser {
     if (graph) {
       this.ctx = ctx;
       this.gainNode = graph.gain;
+      this.gainNode.gain.value = this.inputGain;
       this.nodes = graph.nodes;
       this.silentSink = graph.silentSink;
+      this.worklet = graph.worklet;
+      if (this.worklet) {
+        const worklet = this.worklet;
+        worklet.port.onmessage = ({ data }) => this.receiveFastAnalysis(data, worklet);
+        worklet.onprocessorerror = () => {
+          if (this.worklet !== worklet) return;
+          console.warn('AudioWorklet stopped; using short-window analyser fallback.');
+          worklet.disconnect();
+          worklet.port.close();
+          this.worklet = null;
+          this.previous = { full: 0, low: 0, mid: 0, high: 0 };
+          this.clearPending();
+        };
+      }
       this.sampleBuffers = this.nodes.map(() => new Float32Array(1024));
       this.waveform = this.sampleBuffers[0];
     }
@@ -151,14 +236,34 @@ export class AudioAnalyser {
       oldStream.getTracks().forEach((track) => track.stop());
     }
     this.previous = { full: 0, low: 0, mid: 0, high: 0 };
+    this.resetFastAnalysis();
     this.analysis = this.emptyAnalysis();
   }
 
   getAnalysis() {
     if (!this.ctx || !this.nodes.length) return this.analysis;
+    if (this.worklet) {
+      this.nodes[0].getFloatTimeDomainData(this.waveform);
+      const full = this.fastLevel;
+      const [attack, lowAttack, midAttack, highAttack] = this.pendingDeltas;
+      const [attackTriggered, lowAttackTriggered, midAttackTriggered, highAttackTriggered] = this.pendingFlags;
+      const peak = this.pendingPeak;
+      this.analysis = {
+        volume: clamp(full, 0, 1), inputLevel: full,
+        rawVolume: full / Math.max(this.inputGain, 1e-12),
+        attack, attackTriggered, lowAttack, lowAttackTriggered,
+        midAttack, midAttackTriggered, highAttack, highAttackTriggered,
+        peak, peakTriggered: peak >= this.thresholds.peak,
+        waveform: this.waveform, attackEventMode: true,
+        attackVolume: attackTriggered ? this.pendingVolumes[0] : full,
+        lowAttackVolume: lowAttackTriggered ? this.pendingVolumes[1] : full,
+      };
+      this.clearPending();
+      return this.analysis;
+    }
     const values = this.nodes.map((node, i) => {
       node.getFloatTimeDomainData(this.sampleBuffers[i]);
-      return rms(this.sampleBuffers[i]);
+      return rms(this.sampleBuffers[i], FAST_WINDOWS[i]);
     });
     const [full, low, mid, high] = values;
     const raw = full / Math.max(this.inputGain, 1e-12);
@@ -187,6 +292,9 @@ export class AudioAnalyser {
       peak,
       peakTriggered: peak >= this.thresholds.peak,
       waveform: this.waveform,
+      attackEventMode: false,
+      attackVolume: full,
+      lowAttackVolume: full,
     };
     return this.analysis;
   }
@@ -195,6 +303,10 @@ export class AudioAnalyser {
     const stream = this.stream;
     const ctx = this.ctx;
     this.sourceNode?.disconnect();
+    this.worklet?.disconnect();
+    this.worklet?.port.close();
+    this.worklet = null;
+    this.resetFastAnalysis();
     this.sourceNode = null;
     this.ctx = null;
     this.stream = null;

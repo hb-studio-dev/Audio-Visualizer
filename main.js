@@ -1,8 +1,8 @@
-import { AudioAnalyser } from "./audio/audioAnalyser.js?v=mic-permission-en-v1";
-import { AudioSelector } from "./audio/audioSelector.js?v=mic-permission-en-v1";
-import { SettingsMenu } from "./ui/settingsMenu.js?v=mic-permission-en-v1";
+import { AudioAnalyser } from "./audio/audioAnalyser.js?v=fast-audio-v1";
+import { AudioSelector } from "./audio/audioSelector.js?v=fast-audio-v1";
+import { SettingsMenu } from "./ui/settingsMenu.js?v=fast-audio-v1";
 // Replace this import to load a different visualizer.
-import { createVisualizer } from "./visualizers/particle-wave-gravity.js";
+import { createVisualizer } from "./visualizers/particle-wave-gravity.js?v=fast-audio-v1";
 
 const $ = (id) => document.getElementById(id);
 const initial = $("initialDeviceSelect");

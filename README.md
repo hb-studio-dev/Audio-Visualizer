@@ -66,17 +66,33 @@ The renderer receives the following values in each `update(audio, dt)` call:
 | `volume` | Gain-adjusted full-band RMS, clamped to 0–1 |
 | `inputLevel` | Gain-adjusted full-band RMS without the 1.0 cap |
 | `rawVolume` | RMS before input gain |
-| `attack`, `attackTriggered` | Full-band RMS increase and detection flag |
+| `attack`, `attackTriggered` | Full-band envelope increase and detection flag |
 | `lowAttack`, `lowAttackTriggered` | Low-band (approximately below 250 Hz) |
 | `midAttack`, `midAttackTriggered` | Mid-band (approximately 250–4000 Hz) |
 | `highAttack`, `highAttackTriggered` | High-band (approximately above 4000 Hz) |
 | `peak`, `peakTriggered` | Peak sample amplitude and detection flag |
 | `waveform` | Reused `Float32Array(1024)` of time-domain audio samples |
+| `attackEventMode` | True when flags are consumed audio-thread events (do not edge-detect them again) |
+| `attackVolume`, `lowAttackVolume` | Full-band short-window RMS at the corresponding attack (otherwise latest RMS) |
 
 Thresholds are expressed as dBFS relative to amplitude 1.0, including the
-positive RMS *difference* used for attack detection. Existing defaults are
-converted from the original amplitude thresholds and were not changed by the
-microphone-selector update.
+positive envelope difference used for attack detection. Existing threshold values
+and saved settings are retained, but detection sensitivity may differ.
+
+The AudioWorklet (`audio/analysisProcessor.js`) analyzes every 128 samples,
+using 256-sample RMS windows for full/mid/high and 512 samples for low.
+At 48 kHz this is a 2.67 ms analysis hop with 5.33/10.67 ms windows.
+The onset detector compares a fast-rise, slow-release envelope to its value
+about 10 ms earlier, with a 24 ms trailing peak hold to suppress steady bass
+oscillations. A half-threshold rearm and 16 ms minimum interval
+per band reduce repeated triggers. Routine reports are sent every two hops;
+attacks are sent immediately and retained until the next render. Multiple
+attacks in the same band within one render frame are combined into one flag.
+The renderer still updates at display refresh rate. The audio device and
+browser determine the actual capture and presentation latency.
+If AudioWorklet is unavailable, the existing frame-based analyser uses the
+short RMS windows as a fallback. Microphone input requests low latency, but
+browsers may ignore this hint. Waveform length and graphics settings are unchanged.
 
 ## Use a different visualizer
 

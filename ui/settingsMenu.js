@@ -1,4 +1,4 @@
-import { DEVICE_DEFAULT_SETTINGS } from "../audio/audioAnalyser.js?v=mic-permission-en-v1";
+import { DEVICE_DEFAULT_SETTINGS } from "../audio/audioAnalyser.js?v=fast-audio-v1";
 
 const CONTROL_DEFS = [
   {
@@ -243,7 +243,7 @@ export class SettingsMenu {
     // 解析器が返すinputLevelを優先。旧版データとの互換性のため
     // waveform/volumeもフォールバックに使う。
     let level = Number(analysis?.inputLevel);
-    if (!Number.isFinite(level) || level <= 0) {
+    if (!Number.isFinite(level) || level < 0) {
       const wave = analysis?.waveform;
       if (wave && wave.length) {
         let power = 0;
