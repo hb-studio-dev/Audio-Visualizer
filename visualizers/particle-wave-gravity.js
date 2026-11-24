@@ -46,7 +46,7 @@ export function createVisualizer(mount) {
     const GRAVITY_MAX_POINTS = 6;
 
     const GRAVITY_SPEED_MIN = 0;
-    const GRAVITY_SPEED_MAX = 5;
+    const GRAVITY_SPEED_MAX = 2;
     const GRAVITY_STATIONARY_PROBABILITY = 0.5;
 
     const GRAVITY_STRENGTH_MIN = 3;
