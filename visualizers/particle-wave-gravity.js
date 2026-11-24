@@ -46,6 +46,13 @@ export function createVisualizer(mount) {
     const GRAVITY_ENABLED = true;
     const GRAVITY_MAX_POINTS = 6;
 
+    // 重力点の生成・上書き確率
+    // 0.0 = 0%
+    // 0.5 = 50%
+    // 1.0 = 100%
+
+    const GRAVITY_SPAWN_PROBABILITY = 0.1;
+
     const GRAVITY_SPEED_MIN = 0;
     const GRAVITY_SPEED_MAX = 2;
     const GRAVITY_STATIONARY_PROBABILITY = 0.5;
@@ -73,13 +80,22 @@ export function createVisualizer(mount) {
 
     const ATTACK_SHIFT_ENABLED = true;
 
+    // スライスの発生確率
+    // 0.0 = 0%
+    // 0.5 = 50%
+    // 1.0 = 100%
+
+    const ATTACK_SHIFT_PROBABILITY = 0.2;
+
     // 左右に移動する横帯の高さ
-    // 画面高さに対する %
+    // 画面高さに対する%
+
     const ATTACK_SHIFT_MIN_HEIGHT = 15;
     const ATTACK_SHIFT_MAX_HEIGHT = 30;
 
     // 上下に移動する縦帯の幅
-    // 画面幅に対する %
+    // 画面幅に対する%
+
     const ATTACK_SHIFT_MIN_WIDTH = 15;
     const ATTACK_SHIFT_MAX_WIDTH = 30;
 
@@ -174,6 +190,14 @@ export function createVisualizer(mount) {
 
         !Number.isSafeInteger(GRAVITY_MAX_POINTS) ||
         GRAVITY_MAX_POINTS < 1 ||
+
+        !Number.isFinite(GRAVITY_SPAWN_PROBABILITY) ||
+        GRAVITY_SPAWN_PROBABILITY < 0 ||
+        GRAVITY_SPAWN_PROBABILITY > 1 ||
+
+        !Number.isFinite(ATTACK_SHIFT_PROBABILITY) ||
+        ATTACK_SHIFT_PROBABILITY < 0 ||
+        ATTACK_SHIFT_PROBABILITY > 1 ||
 
         GRAVITY_DECAY_RATE <= 0 ||
         GRAVITY_DECAY_CURVE <= 0 ||
@@ -278,6 +302,7 @@ export function createVisualizer(mount) {
         a + Math.random() * (b - a);
 
     function lifetime(alpha, decay) {
+
         if (alpha <= PARTICLE_MIN_ALPHA) {
             return 0;
         }
@@ -355,6 +380,7 @@ export function createVisualizer(mount) {
         GRAVITY_MAX_POINTS + 10 >
         gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS)
     ) {
+
         canvas.remove();
 
         if (changedPosition) {
@@ -1302,71 +1328,111 @@ void main() {
     }
 
     // ========================================
-    // Low Attackによる上下左右スライス生成
+    // RMS計算
     // ========================================
 
     function waveformRms(waveform) {
+
         let sum = 0;
+
         for (let i = 0; i < waveform.length; i++) {
             sum += waveform[i] * waveform[i];
         }
+
         return Math.sqrt(sum / waveform.length);
     }
 
+    // ========================================
+    // Low Attackによる上下左右スライス生成
+    // ========================================
+
     function createAttackShift(waveform, fastVolume) {
+
         if (!ATTACK_SHIFT_ENABLED || !waveform?.length) {
             return null;
         }
 
-        // アタック検出時点の短いRMS窓を優先。旧解析器にも対応。
+        // ====================================
+        // スライス発生確率の判定
+        //
+        // Low Attackごとに1回抽選する
+        // 抽選に外れた場合はスライスしない
+        // ====================================
+
+        if (Math.random() >= ATTACK_SHIFT_PROBABILITY) {
+            return null;
+        }
+
+        // アタック検出時点の短いRMS窓を優先
+        // 旧解析器にも対応
+
         const rms = Number.isFinite(fastVolume)
             ? fastVolume
             : waveformRms(waveform);
+
         if (!Number.isFinite(rms) || rms <= 0) {
             return null;
         }
 
         // 左右・上下を各50%、符号を各50%で選択
+
         const axis = Math.random() < 0.5 ? 0 : 1;
         const direction = Math.random() < 0.5 ? -1 : 1;
         const horizontal = axis === 0;
 
         // 選ばれた移動軸の設定だけを使用
+
         const reference = horizontal
             ? ATTACK_SHIFT_X_VOLUME_REFERENCE
             : ATTACK_SHIFT_Y_VOLUME_REFERENCE;
+
         const maxDistance = horizontal
             ? ATTACK_SHIFT_X_MAX_DISTANCE
             : ATTACK_SHIFT_Y_MAX_DISTANCE;
+
         const distanceCurve = horizontal
             ? ATTACK_SHIFT_X_VOLUME_CURVE
             : ATTACK_SHIFT_Y_VOLUME_CURVE;
+
         const maxInertia = horizontal
             ? ATTACK_SHIFT_X_MAX_INERTIA_SPEED
             : ATTACK_SHIFT_Y_MAX_INERTIA_SPEED;
+
         const inertiaCurve = horizontal
             ? ATTACK_SHIFT_X_INERTIA_VOLUME_CURVE
             : ATTACK_SHIFT_Y_INERTIA_VOLUME_CURVE;
 
-        // 選択された軸の移動・慣性が両方0ならスライスしない
+        // 選択された軸の移動・慣性が両方0なら
+        // スライスしない
+
         if (maxDistance === 0 && maxInertia === 0) {
             return null;
         }
 
         const bandDimension = horizontal ? height : width;
         const moveDimension = horizontal ? width : height;
+
         const center = Math.random() * bandDimension;
+
         const bandSize = randomBetween(
-            horizontal ? ATTACK_SHIFT_MIN_HEIGHT : ATTACK_SHIFT_MIN_WIDTH,
-            horizontal ? ATTACK_SHIFT_MAX_HEIGHT : ATTACK_SHIFT_MAX_WIDTH
+            horizontal
+                ? ATTACK_SHIFT_MIN_HEIGHT
+                : ATTACK_SHIFT_MIN_WIDTH,
+            horizontal
+                ? ATTACK_SHIFT_MAX_HEIGHT
+                : ATTACK_SHIFT_MAX_WIDTH
         ) / 100 * bandDimension;
 
         const volume = clamp(rms / reference, 0, 1);
 
         // 位置のズレと慣性は独立して算出
-        const distance = Math.pow(volume, distanceCurve) *
+
+        const distance =
+            Math.pow(volume, distanceCurve) *
             maxDistance / 100 * moveDimension;
-        const inertiaSpeed = Math.pow(volume, inertiaCurve) *
+
+        const inertiaSpeed =
+            Math.pow(volume, inertiaCurve) *
             maxInertia / 100 * moveDimension;
 
         return {
@@ -1388,6 +1454,17 @@ void main() {
             return;
         }
 
+        // ====================================
+        // 重力点の生成・上書き確率の判定
+        //
+        // 全帯域のAttackごとに1回抽選する
+        // 抽選に外れた場合は既存の重力点を維持
+        // ====================================
+
+        if (Math.random() >= GRAVITY_SPAWN_PROBABILITY) {
+            return;
+        }
+
         const stationary =
             Math.random() < GRAVITY_STATIONARY_PROBABILITY;
 
@@ -1405,6 +1482,11 @@ void main() {
             GRAVITY_STRENGTH_MIN,
             GRAVITY_STRENGTH_MAX
         ) * volumeFactor(waveform, fastVolume);
+
+        // 最大数に達している場合は
+        // 最も古い重力点を削除する
+        //
+        // 確率判定に成功した場合のみ実行される
 
         if (gravityPoints.length >= GRAVITY_MAX_POINTS) {
             gravityPoints.shift()?.marker?.remove();
@@ -1558,15 +1640,19 @@ void main() {
             const j = i * 4;
 
             // X座標
+
             stagingState[j] = xr * width;
 
             // Y座標
+
             stagingState[j + 1] = cy;
 
             // X方向初期速度
+
             stagingState[j + 2] = 0;
 
             // Y方向初期速度
+
             stagingState[j + 3] =
                 sample /
                 SPEED_DIVISOR *
@@ -1895,7 +1981,7 @@ void main() {
             // =================================
             // スライス情報をGPUに転送
             //
-            // Low Attackがない場合は
+            // スライスが発生しなかった場合は
             // 移動量と追加速度を0に戻す
             // =================================
 
@@ -2264,24 +2350,37 @@ void main() {
             // =================================
             // 全帯域のアタック
             //
-            // 重力点を生成
+            // 重力点を確率的に生成・上書きする
             // =================================
 
-            if (attack && (audio?.attackEventMode || !previousAttack)) {
+            if (
+                attack &&
+                (audio?.attackEventMode || !previousAttack)
+            ) {
 
-                spawnGravity(now, waveform, audio?.attackVolume);
+                spawnGravity(
+                    now,
+                    waveform,
+                    audio?.attackVolume
+                );
             }
 
             // =================================
             // Low Attack
             //
-            // 上下左右のいずれかにスライス
+            // 確率的に上下左右のいずれかにスライス
             // 同方向に慣性を加算
             // =================================
 
-            if (lowAttack && (audio?.attackEventMode || !previousLowAttack)) {
+            if (
+                lowAttack &&
+                (audio?.attackEventMode || !previousLowAttack)
+            ) {
 
-                attackShift = createAttackShift(waveform, audio?.lowAttackVolume);
+                attackShift = createAttackShift(
+                    waveform,
+                    audio?.lowAttackVolume
+                );
             }
 
             // アタック状態の保存
