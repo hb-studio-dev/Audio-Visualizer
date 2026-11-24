@@ -21,7 +21,7 @@ export function normalizeCrossovers(settings, editedKey) {
   const hz = (value, fallback) => Number.isFinite(value)
     ? Math.round(Math.max(CROSSOVER_MIN_HZ, Math.min(CROSSOVER_MAX_HZ, value)))
     : fallback;
-  let low = hz(settings.lowMidCrossoverHz, 250);
+  let low = hz(settings.lowMidCrossoverHz, 120);
   let high = hz(settings.midHighCrossoverHz, 4000);
   if (low >= high) {
     if (editedKey === 'midHighCrossoverHz') {
@@ -37,7 +37,7 @@ export function normalizeCrossovers(settings, editedKey) {
 
 export const DEFAULT_SETTINGS = Object.freeze({
   inputGainDb: 18,
-  lowMidCrossoverHz: 250,
+  lowMidCrossoverHz: 120,
   midHighCrossoverHz: 4000,
   ...DEFAULT_THRESHOLDS_DB,
 });
