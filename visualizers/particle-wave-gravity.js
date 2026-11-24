@@ -51,7 +51,7 @@ export function createVisualizer(mount) {
     // 0.5 = 50%
     // 1.0 = 100%
 
-    const GRAVITY_SPAWN_PROBABILITY = 0.1;
+    const GRAVITY_SPAWN_PROBABILITY = 0.3;
 
     const GRAVITY_SPEED_MIN = 0;
     const GRAVITY_SPEED_MAX = 2;
