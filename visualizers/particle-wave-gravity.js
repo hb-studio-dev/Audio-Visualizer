@@ -261,13 +261,13 @@ export function createVisualizer(mount) {
     // 増加：最も遅いときの周期が短くなる
     // 減少：最も遅いときの周期が長くなる
     // 範囲：0以上、GRAVITY_STRENGTH_LFO_FREQ_MAX以下
-    const GRAVITY_STRENGTH_LFO_FREQ_MIN = 0.005;
+    const GRAVITY_STRENGTH_LFO_FREQ_MIN = 0.002;
 
     // 重力強度LFOの最高周波数（Hz）
     // 増加：最も速いときの周期が短くなる
     // 減少：最も速いときの周期が長くなる
     // 範囲：GRAVITY_STRENGTH_LFO_FREQ_MIN以上
-    const GRAVITY_STRENGTH_LFO_FREQ_MAX = 0.02;
+    const GRAVITY_STRENGTH_LFO_FREQ_MAX = 0.01;
 
     // 重力強度LFOの周波数自体を変化させる周波数（Hz）
     // 増加：最低周波数と最高周波数の間を速く往復する
