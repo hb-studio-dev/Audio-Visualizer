@@ -209,7 +209,7 @@ export function createVisualizer(mount) {
     // 0.5：50%
     // 1.0：100%
     // 範囲：0〜1
-    const GRAVITY_SPAWN_PROBABILITY = 0.3;
+    const GRAVITY_SPAWN_PROBABILITY = 1;
 
 
     // 移動する重力点の最低速度
@@ -240,7 +240,7 @@ export function createVisualizer(mount) {
     // 増加：弱い重力点でも強く引き寄せる
     // 減少：弱い重力点が生成されやすくなる
     // 範囲：0以上、GRAVITY_STRENGTH_MAX以下
-    const GRAVITY_STRENGTH_MIN = 3;
+    const GRAVITY_STRENGTH_MIN = 10;
 
     // 重力点の最高加速度（音量補正前）
     // 単位：画面高さに対する%/秒²
@@ -248,7 +248,7 @@ export function createVisualizer(mount) {
     // 減少：重力点の引き寄せが全体的に弱くなる
     // 範囲：GRAVITY_STRENGTH_MIN以上
     // 実際の強さは音量・距離・時間経過でも変化する
-    const GRAVITY_STRENGTH_MAX = 20;
+    const GRAVITY_STRENGTH_MAX = 30;
 
 
     // アタック音量が重力の強さに与える影響度
