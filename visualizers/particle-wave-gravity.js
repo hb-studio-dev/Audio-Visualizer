@@ -42,7 +42,7 @@ export function createVisualizer(mount) {
     // 増加：消滅直前の粒子が大きくなる
     // 減少：消滅直前の粒子が小さくなる
     // 範囲：0以上を推奨（0で非表示、上限はGPU依存）
-    const ATTACK_FINAL_SIZE = 1.5;
+    const ATTACK_FINAL_SIZE = 3;
 
     // アタック粒子のサイズ変化のカーブ
     // 増加：生成直後から急速に最終サイズへ近づく
@@ -199,7 +199,7 @@ export function createVisualizer(mount) {
     // 上限に達すると最も古い重力点が削除される
     // 範囲：1以上の整数
     // 上限はGPUの頂点シェーダーのuniform容量に依存
-    const GRAVITY_MAX_POINTS = 6;
+    const GRAVITY_MAX_POINTS = 16;
 
 
     // 全帯域アタック時の重力点生成・上書き確率
@@ -239,16 +239,42 @@ export function createVisualizer(mount) {
     // 単位：画面高さに対する%/秒²
     // 増加：弱い重力点でも強く引き寄せる
     // 減少：弱い重力点が生成されやすくなる
-    // 範囲：0以上、GRAVITY_STRENGTH_MAX以下
-    const GRAVITY_STRENGTH_MIN = 10;
+    // 範囲：0以上、GRAVITY_STRENGTH_MAX_MIN以下
+    const GRAVITY_STRENGTH_MIN = 1;
 
-    // 重力点の最高加速度（音量補正前）
+    // 重力点の最高加速度がLFOで変化する際の最小値（音量補正前）
     // 単位：画面高さに対する%/秒²
-    // 増加：強い重力点が生成されやすくなる
-    // 減少：重力点の引き寄せが全体的に弱くなる
-    // 範囲：GRAVITY_STRENGTH_MIN以上
+    // 増加：LFOが最も弱いときも強い重力点が生成されやすくなる
+    // 減少：LFOが最も弱いときの重力点の強さの上限が下がる
+    // 範囲：GRAVITY_STRENGTH_MIN以上、GRAVITY_STRENGTH_MAX_MAX以下
+    const GRAVITY_STRENGTH_MAX_MIN = 3;
+
+    // 重力点の最高加速度がLFOで変化する際の最大値（音量補正前）
+    // 単位：画面高さに対する%/秒²
+    // 増加：LFOが最も強いときにより強い重力点が生成されやすくなる
+    // 減少：LFOが最も強いときの重力点の強さの上限が下がる
+    // 範囲：GRAVITY_STRENGTH_MAX_MIN以上
     // 実際の強さは音量・距離・時間経過でも変化する
-    const GRAVITY_STRENGTH_MAX = 30;
+    const GRAVITY_STRENGTH_MAX_MAX = 30;
+
+    // 重力強度LFOの最低周波数（Hz）
+    // 増加：最も遅いときの周期が短くなる
+    // 減少：最も遅いときの周期が長くなる
+    // 範囲：0以上、GRAVITY_STRENGTH_LFO_FREQ_MAX以下
+    const GRAVITY_STRENGTH_LFO_FREQ_MIN = 0.005;
+
+    // 重力強度LFOの最高周波数（Hz）
+    // 増加：最も速いときの周期が短くなる
+    // 減少：最も速いときの周期が長くなる
+    // 範囲：GRAVITY_STRENGTH_LFO_FREQ_MIN以上
+    const GRAVITY_STRENGTH_LFO_FREQ_MAX = 0.02;
+
+    // 重力強度LFOの周波数自体を変化させる周波数（Hz）
+    // 増加：最低周波数と最高周波数の間を速く往復する
+    // 減少：最低周波数と最高周波数の間をゆっくり往復する
+    // 0：最低周波数と最高周波数の中間値に固定
+    // 範囲：0以上
+    const GRAVITY_STRENGTH_LFO_FREQ_DRIFT = 0.001;
 
 
     // アタック音量が重力の強さに与える影響度
@@ -715,8 +741,19 @@ export function createVisualizer(mount) {
         GRAVITY_RADIUS_MIN <= 0 ||
         GRAVITY_RADIUS_MAX < GRAVITY_RADIUS_MIN ||
 
+        !Number.isFinite(GRAVITY_STRENGTH_MIN) ||
+        !Number.isFinite(GRAVITY_STRENGTH_MAX_MIN) ||
+        !Number.isFinite(GRAVITY_STRENGTH_MAX_MAX) ||
         GRAVITY_STRENGTH_MIN < 0 ||
-        GRAVITY_STRENGTH_MAX < GRAVITY_STRENGTH_MIN ||
+        GRAVITY_STRENGTH_MAX_MIN < GRAVITY_STRENGTH_MIN ||
+        GRAVITY_STRENGTH_MAX_MAX < GRAVITY_STRENGTH_MAX_MIN ||
+
+        !Number.isFinite(GRAVITY_STRENGTH_LFO_FREQ_MIN) ||
+        !Number.isFinite(GRAVITY_STRENGTH_LFO_FREQ_MAX) ||
+        !Number.isFinite(GRAVITY_STRENGTH_LFO_FREQ_DRIFT) ||
+        GRAVITY_STRENGTH_LFO_FREQ_MIN < 0 ||
+        GRAVITY_STRENGTH_LFO_FREQ_MAX < GRAVITY_STRENGTH_LFO_FREQ_MIN ||
+        GRAVITY_STRENGTH_LFO_FREQ_DRIFT < 0 ||
 
         GRAVITY_SPEED_MIN < 0 ||
         GRAVITY_SPEED_MAX < GRAVITY_SPEED_MIN ||
@@ -1798,6 +1835,41 @@ void main() {
     }
 
     // ========================================
+    // 重力強度LFO
+    // ========================================
+
+    let gravityStrengthLfoPhase = 0;
+
+    let gravityStrengthMax =
+        GRAVITY_STRENGTH_MAX_MIN +
+        (GRAVITY_STRENGTH_MAX_MAX - GRAVITY_STRENGTH_MAX_MIN) * 0.5;
+
+    function updateGravityStrengthLfo(now, dt) {
+
+        const mod = (
+            Math.sin(
+                2 * Math.PI * GRAVITY_STRENGTH_LFO_FREQ_DRIFT * now
+            ) + 1
+        ) * 0.5;
+
+        const freq =
+            GRAVITY_STRENGTH_LFO_FREQ_MIN +
+            (GRAVITY_STRENGTH_LFO_FREQ_MAX - GRAVITY_STRENGTH_LFO_FREQ_MIN) * mod;
+
+        gravityStrengthLfoPhase = (
+            gravityStrengthLfoPhase +
+            2 * Math.PI * freq * dt
+        ) % (2 * Math.PI);
+
+        const value =
+            (Math.sin(gravityStrengthLfoPhase) + 1) * 0.5;
+
+        gravityStrengthMax =
+            GRAVITY_STRENGTH_MAX_MIN +
+            (GRAVITY_STRENGTH_MAX_MAX - GRAVITY_STRENGTH_MAX_MIN) * value;
+    }
+
+    // ========================================
     // 重力点管理
     // ========================================
 
@@ -1989,7 +2061,7 @@ void main() {
 
         const strength = randomBetween(
             GRAVITY_STRENGTH_MIN,
-            GRAVITY_STRENGTH_MAX
+            gravityStrengthMax
         ) * volumeFactor(waveform, fastVolume);
 
         // 最大数に達している場合は
@@ -2831,6 +2903,12 @@ void main() {
             // =================================
 
             updateColorLfo(now, step);
+
+            // =================================
+            // 重力強度LFO
+            // =================================
+
+            updateGravityStrengthLfo(now, step);
 
             // =================================
             // アタック検出
